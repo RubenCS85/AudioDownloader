@@ -166,107 +166,41 @@ class YouTubeProvider:
     ) -> DownloadResult:
         """
         Download a Track or a Collection (playlist). For collections, yt-dlp handles it directly.
-        Returns paths best-effort (yt-dlp output parsing). If paths can't be inferred, returns empty.
+        Real cancellation supported via options.cancel_event.
         """
-        source = item.url if getattr(item, "url", None) else item.source
+        source = str(item.url) if getattr(item, "url", None) else item.source
 
-        emit_progress(progress, provider_id=self.id, phase="download", message="Iniciando descarga…", progress_value=0.0)
-
-        # Output template: keep it simple and predictable
         outtmpl = f"{options.output_dir}/%(title)s.%(ext)s"
 
-        cmd: List[str] = [
-            "yt-dlp",
-            "--no-warnings",
-            "--newline",
-            "-x",
-            "--audio-format",
-            options.audio_format,
-            "--audio-quality",
-            options.audio_quality,
-            "-o",
-            outtmpl,
-        ]
+        result = run_ytdlp(
+            source=source,
+            output_template=outtmpl,
+            audio_format=options.audio_format,
+            audio_quality=options.audio_quality,
+            overwrite=options.overwrite,
+            cookies_path=options.cookies_path,
+            ffmpeg_path=options.ffmpeg_path,
+            tmp_dir=options.tmp_dir,
+            progress=progress,
+            provider_id=self.id,
+            extra_args=[
+                "--no-part",
+            ],
+            cancel_event=options.cancel_event,   # ✅ CLAVE
+        )
 
-        # Cookies / ffmpeg / temp
-        if options.cookies_path:
-            cmd += ["--cookies", options.cookies_path]
-        if options.ffmpeg_path:
-            cmd += ["--ffmpeg-location", options.ffmpeg_path]
-        if options.tmp_dir:
-            cmd += ["-P", f"temp:{options.tmp_dir}"]
-
-        # Overwrite behavior
-        if options.overwrite:
-            cmd += ["--force-overwrites"]
-        else:
-            cmd += ["--no-overwrites"]
-
-        # Some sane defaults
-        cmd += [
-            "--no-part",          # avoid .part files lingering (optional)
-            "--restrict-filenames",
-        ]
-
-        cmd.append(str(source))
-
-        proc = _run(cmd)
-
-        output_paths: List[str] = []
-        last_percent: Optional[float] = None
-
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-
-            # Progress percentage
-            m = _PROGRESS_RE.search(line)
-            if m:
-                try:
-                    pct = float(m.group(1))
-                    last_percent = pct / 100.0
-                    emit_progress(
-                        progress,
-                        provider_id=self.id,
-                        phase="download",
-                        message=f"Descargando… {pct:.1f}%",
-                        progress_value=last_percent,
-                    )
-                except Exception:
-                    pass
-
-            # Capture destination path (best effort)
-            d = _DEST_RE.search(line)
-            if d:
-                p = d.group(1).strip()
-                if p:
-                    output_paths.append(p)
-
-            # Forward notable lines as messages (optional but useful)
-            if line.startswith("[ExtractAudio]") or line.startswith("[ffmpeg]"):
-                emit_progress(progress, provider_id=self.id, phase="postprocess", message=line)
-
-        rc = proc.wait()
-        if rc != 0:
-            raise ProviderError(f"yt-dlp failed with exit code {rc}")
-
-        emit_progress(progress, provider_id=self.id, phase="download", message="Descarga completada", progress_value=1.0)
-
-        # Deduplicate while preserving order
-        deduped: List[str] = []
-        seen = set()
-        for p in output_paths:
-            if p not in seen:
-                seen.add(p)
-                deduped.append(p)
+        warnings: List[str] = []
+        if getattr(result, "cancelled", False):
+            warnings.append("Descarga cancelada por el usuario.")
+        elif result.already_downloaded and not options.overwrite:
+            warnings.append("El archivo ya estaba descargado (no-overwrites).")
 
         return DownloadResult(
             provider_id=self.id,
             item_title=item.title,
-            output_paths=tuple(deduped),
-            warnings=(),
+            output_paths=result.output_paths,
+            warnings=tuple(warnings),
         )
-
 
 # Register at import time
 register_provider(YouTubeProvider())
