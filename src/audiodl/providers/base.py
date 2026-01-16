@@ -62,6 +62,9 @@ class DownloadOptions:
     ffmpeg_path: Optional[str] = None
     tmp_dir: Optional[str] = None
 
+    # NEW: cancellation support (threading.Event-like object with is_set())
+    cancel_event: Optional[Any] = None
+
 
 @dataclass(frozen=True)
 class ProgressEvent:
