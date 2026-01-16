@@ -1,0 +1,2 @@
+# No Python deps required (stdlib only)
+# External deps: yt-dlp, ffmpeg, deno (per your config)
