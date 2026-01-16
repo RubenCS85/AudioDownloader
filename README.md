@@ -1,20 +1,101 @@
-# YouTubeChannelAudioDownloader
+# AudioDL
 
-GUI (Tkinter) para descargar audio de YouTube usando yt-dlp, con soporte de:
-- canal/playlist
-- historial (download-archive)
-- cancelación robusta en Windows
-- normalización loudnorm (ffmpeg)
-- metadatos artista - título
-- opción embed thumbnail
+**AudioDL** es una aplicación de descarga de audio **profesional, modular y escalable**, diseñada para soportar múltiples plataformas mediante un sistema de *providers* enchufables.
 
-## Requisitos
-- Windows recomendado
-- yt-dlp instalado (por defecto en `C:\yt-dlp\yt-dlp.exe`)
-- ffmpeg en PATH (necesario para mp3 y/o loudnorm)
-- deno en PATH (si usas `--js-runtimes deno`)
-- `cookies.txt` (NO se sube al repo)
+Actualmente soporta **YouTube** como fuente descargable y está preparada arquitectónicamente para integrar **Spotify, Apple Music, Mixcloud y otros servicios**.
 
-## Ejecutar
+---
+
+## ✨ Características principales
+
+- � **Arquitectura basada en providers**
+- � **Pipeline desacoplado**
+- �️ **Interfaz gráfica (Tkinter)**
+- � **CLI incluida**
+- ⚙️ **Configuración flexible**
+- � **Escalable y mantenible**
+
+---
+
+## � Estructura del proyecto
+
+```
+AudioDownloader/
+├─ configs/
+│  └─ default.yaml
+├─ scripts/
+│  └─ dev_run_tkinter.py
+├─ src/
+│  └─ audiodl/
+│     ├─ core/
+│     ├─ providers/
+│     ├─ ui/
+│     └─ __main__.py
+├─ pyproject.toml
+└─ README.md
+```
+
+---
+
+## ▶️ Uso rápido
+
+### UI (desarrollo)
+
 ```bash
-python main.py
+python scripts/dev_run_tkinter.py
+```
+
+### CLI
+
+```bash
+audiodl "https://www.youtube.com/watch?v=XXXX"
+```
+
+---
+
+## ⚙️ Configuración
+
+Archivo base:
+
+```
+configs/default.yaml
+```
+
+Variables de entorno:
+
+```
+AUDIODL_DOWNLOAD_DIR
+AUDIODL_TMP_DIR
+AUDIODL_FFMPEG_PATH
+AUDIODL_COOKIES_PATH
+AUDIODL_AUDIO_FORMAT
+AUDIODL_AUDIO_QUALITY
+AUDIODL_OVERWRITE
+AUDIODL_LOG_LEVEL
+```
+
+---
+
+## � Providers
+
+### Implementado
+- YouTube (yt-dlp)
+
+### En preparación
+- Spotify (metadata + bridge)
+- Apple Music (metadata + bridge)
+- Mixcloud
+
+---
+
+## � Licencia
+
+MIT
+
+---
+
+## � Autor
+
+Ruben  
+OPTIMA IBERICA  
+ruben@optimaiberica.es
