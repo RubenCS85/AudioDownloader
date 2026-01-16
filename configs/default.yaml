@@ -1,0 +1,42 @@
+# Default configuration for AudioDL
+# This file can be overridden by:
+#  - environment variables (AUDIODL_*)
+#  - CLI arguments
+#  - UI overrides
+
+# -------------------------
+# Paths
+# -------------------------
+download_dir: "~/Downloads/AudioDL"
+# tmp_dir: "/tmp/audiodl"
+
+# -------------------------
+# External tools
+# -------------------------
+# yt_dlp_path: "yt-dlp"
+# ffmpeg_path: "/usr/bin/ffmpeg"
+# cookies_path: "/path/to/cookies.txt"
+
+# -------------------------
+# Audio defaults
+# -------------------------
+audio_format: "mp3"
+audio_quality: "0"   # mp3 V0 (best VBR)
+
+# -------------------------
+# Behaviour
+# -------------------------
+overwrite: false
+
+# -------------------------
+# Future provider settings (placeholders)
+# -------------------------
+# spotify:
+#   client_id: ""
+#   client_secret: ""
+#
+# apple_music:
+#   developer_token: ""
+#
+# mixcloud:
+#   enabled: true
