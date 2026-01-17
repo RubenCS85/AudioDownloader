@@ -214,7 +214,7 @@ class AudioDLTkApp(ttk.Frame):
         # Note: yt-dlp subprocess cancellation isn't wired yet.
         # This stops UI waiting and prevents new actions; next step is adding cancellation support.
         self._stop_flag.set()
-        self._append_log("⏹ Solicitado parar (cancelación real pendiente de implementar).\n")
+        self._append_log("⏹ Cancelación solicitada: deteniendo yt-dlp…\n")
 
     def _set_running(self, running: bool) -> None:
         self.btn_start.configure(state="disabled" if running else "normal")
@@ -253,7 +253,7 @@ class AudioDLTkApp(ttk.Frame):
 
     def _run_pipeline(self, req: PipelineRequest) -> None:
         try:
-            pipeline = Pipeline(progress=self._progress_cb)
+            pipeline = Pipeline(progress=self._progress_cb, cancel_event=self._stop_flag)
             results = pipeline.run(req)
 
             if self._stop_flag.is_set():

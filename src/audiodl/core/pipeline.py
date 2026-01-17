@@ -10,7 +10,7 @@ Responsibilities:
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Any
 
 from audiodl.core.models import (
     Collection,
@@ -35,8 +35,9 @@ class Pipeline:
     This class should contain ZERO provider-specific logic.
     """
 
-    def __init__(self, *, progress: Optional[ProgressCallback] = None) -> None:
+    def __init__(self, *, progress: Optional[ProgressCallback] = None, cancel_event: Optional[Any] = None) -> None:
         self._progress = progress
+        self._cancel_event = cancel_event
 
     def run(self, request: PipelineRequest) -> List[CoreDownloadResult]:
         """
@@ -59,6 +60,7 @@ class Pipeline:
             cookies_path=request.cookies_path,
             ffmpeg_path=request.ffmpeg_path,
             tmp_dir=request.tmp_dir,
+            cancel_event=self._cancel_event,
         )
 
         results: List[CoreDownloadResult] = []

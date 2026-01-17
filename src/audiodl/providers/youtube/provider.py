@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from audiodl.core.models import Collection, ProviderRef, Track
+from audiodl.providers.youtube.ytdlp_runner import run_ytdlp
+
 from audiodl.providers.base import (
     DownloadOptions,
     DownloadResult,
@@ -164,12 +166,7 @@ class YouTubeProvider:
         *,
         progress: Optional[ProgressCallback] = None,
     ) -> DownloadResult:
-        """
-        Download a Track or a Collection (playlist). For collections, yt-dlp handles it directly.
-        Real cancellation supported via options.cancel_event.
-        """
         source = str(item.url) if getattr(item, "url", None) else item.source
-
         outtmpl = f"{options.output_dir}/%(title)s.%(ext)s"
 
         result = run_ytdlp(
@@ -183,14 +180,12 @@ class YouTubeProvider:
             tmp_dir=options.tmp_dir,
             progress=progress,
             provider_id=self.id,
-            extra_args=[
-                "--no-part",
-            ],
-            cancel_event=options.cancel_event,   # ✅ CLAVE
+            extra_args=["--no-part"],
+            cancel_event=options.cancel_event,  # ✅ CLAVE
         )
 
         warnings: List[str] = []
-        if getattr(result, "cancelled", False):
+        if result.cancelled:
             warnings.append("Descarga cancelada por el usuario.")
         elif result.already_downloaded and not options.overwrite:
             warnings.append("El archivo ya estaba descargado (no-overwrites).")
