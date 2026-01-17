@@ -1,3 +1,25 @@
+"""
+yt-dlp runner wrapper.
+
+Goals:
+- Run yt-dlp in a way that supports robust cancellation (process group).
+- Parse progress in a stable way so the Tkinter progressbar moves reliably.
+- Capture output file paths (Destination: ..., and FILE: ... prints).
+- Detect already-downloaded (including archive skips).
+
+Notes:
+- We intentionally do NOT use --restrict-filenames because it replaces spaces with underscores
+  and tends to "destroy" readable titles.
+- On Windows we use --windows-filenames + --trim-filenames for safe names.
+- We force a stable progress marker using --progress-template so parsing does not depend
+  on yt-dlp's localized/variable progress formatting.
+
+Expected integration:
+- Provider passes `progress` callback and optionally adds:
+  --print after_download:FILE:%(filepath)s
+  --print after_move:FILE:%(filepath)s
+"""
+
 from __future__ import annotations
 
 import os
@@ -10,7 +32,12 @@ from typing import Any, List, Optional, Sequence
 
 from audiodl.providers.base import ProgressCallback, ProviderError, emit_progress
 
+# Stable marker we inject via --progress-template (see cmd building below)
+_PROGRESS_MARK_RE = re.compile(r"\bAUDIODL_PROGRESS:(\d+(?:\.\d+)?)\b")
+
+# Fallback: classic yt-dlp line (kept, but we prefer the stable marker above)
 _PROGRESS_RE = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%")
+
 _DEST_RE = re.compile(r"Destination:\s+(.*)$")
 _ALREADY_RE = re.compile(r"\[download\].*has already been downloaded", re.IGNORECASE)
 _ARCHIVE_RE = re.compile(r"(already been recorded in the archive|already in archive)", re.IGNORECASE)
@@ -129,7 +156,7 @@ def run_ytdlp(
 ) -> YtDlpRunResult:
     """
     Execute yt-dlp with a consistent configuration and parse:
-    - download progress percentage
+    - download progress percentage (robust via --progress-template marker)
     - output destination paths (best effort)
     - already-downloaded signals (including archive skips)
     - real cancellation via cancel_event
@@ -142,10 +169,20 @@ def run_ytdlp(
         progress_value=0.0,
     )
 
+    # Stable progress marker:
+    # yt-dlp exposes %(progress._percent_str)s -> e.g. "12.3%"
+    # We embed it as "AUDIODL_PROGRESS:12.3" so our regex can parse it reliably.
+    #
+    # - We keep --newline so each update is a line.
+    # - We set template only for "download" group.
+    progress_template = "download:AUDIODL_PROGRESS:%(progress._percent_str)s"
+
     cmd: List[str] = [
         "yt-dlp",
         "--no-warnings",
         "--newline",
+        "--progress-template",
+        progress_template,
         "-x",
         "--audio-format",
         audio_format,
@@ -153,7 +190,7 @@ def run_ytdlp(
         audio_quality,
         "-o",
         output_template,
-        # � IMPORTANTE: quitamos --restrict-filenames porque destroza títulos (espacios -> _)
+        # IMPORTANT: we do NOT use --restrict-filenames because it makes ugly underscores, etc.
     ]
 
     # ✅ Nombres “bonitos” y seguros en Windows (como tu main.py)
@@ -171,7 +208,7 @@ def run_ytdlp(
     # Overwrite behavior
     cmd += ["--force-overwrites"] if overwrite else ["--no-overwrites"]
 
-    # Allow caller to extend (e.g. tags, embed-thumbnail, archive, etc.)
+    # Allow caller to extend (e.g. tags, embed-thumbnail, archive, --print FILE:..., etc.)
     if extra_args:
         cmd += list(extra_args)
 
@@ -198,13 +235,21 @@ def run_ytdlp(
                     _request_stop(proc)
                     break
             except Exception:
+                # If cancel_event isn't compatible, ignore it
                 pass
 
-        # Progress percentage
-        m = _PROGRESS_RE.search(line)
-        if m:
+        # -------------------------
+        # Progress (preferred: stable marker)
+        # -------------------------
+        # Example line from template: "AUDIODL_PROGRESS:12.3%"
+        # We parse the number and ignore the trailing '%'.
+        # -------------------------
+        # Progress (preferred: stable marker)
+        # -------------------------
+        m_mark = _PROGRESS_MARK_RE.search(line)
+        if m_mark:
             try:
-                pct = float(m.group(1))
+                pct = float(m_mark.group(1))
                 emit_progress(
                     progress,
                     provider_id=provider_id,
@@ -214,8 +259,25 @@ def run_ytdlp(
                 )
             except Exception:
                 pass
+        else:
+            # Fallback: classic yt-dlp progress line
+            m = _PROGRESS_RE.search(line)
+            if m:
+                try:
+                    pct = float(m.group(1))
+                    emit_progress(
+                        progress,
+                        provider_id=provider_id,
+                        phase="download",
+                        message=f"Descargando… {pct:.1f}%",
+                        progress_value=pct / 100.0,
+                    )
+                except Exception:
+                    pass
 
-        # Destination path (best effort)
+        # -------------------------
+        # Output paths (best effort)
+        # -------------------------
         d = _DEST_RE.search(line)
         if d:
             p = d.group(1).strip()
@@ -229,7 +291,9 @@ def run_ytdlp(
             if p:
                 output_paths.append(p)
 
-        # Already downloaded (including archive skips)
+        # -------------------------
+        # Already downloaded / archive skips
+        # -------------------------
         if _ALREADY_RE.search(line) or _ARCHIVE_RE.search(line):
             already_downloaded = True
 

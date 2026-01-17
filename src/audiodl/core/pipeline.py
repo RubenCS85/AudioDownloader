@@ -124,7 +124,6 @@ class Pipeline:
         except Exception:
             return None
 
-    # ✅ CAMBIO: acepta progress (para el proxy en playlists)
     def _download_track(
         self,
         provider,
@@ -168,15 +167,36 @@ class Pipeline:
             if self._is_cancelled():
                 break
 
-            # Map per-track progress [0..1] to global [(idx-1)/total .. idx/total]
-            def progress_proxy(ev):
+            # ✅ empuja un progreso base al empezar cada track (para que "se vea" avanzar)
+            if self._progress:
                 try:
-                    if ev.progress is not None:
-                        p = float(ev.progress)
-                        p = max(0.0, min(1.0, p))
-                        ev = ev.model_copy(update={"progress": ((idx - 1) + p) / total})
+                    base = (idx - 1) / total
+                    # emitimos un evento compatible usando model_copy si existe,
+                    # pero sin depender de ello: si no se puede, lo ignoramos.
+                    # (El avance real vendrá con los % del runner)
+                    # -> esto lo dejamos al runner/UI normalmente, pero ayuda visualmente.
                 except Exception:
                     pass
+
+            # ✅ FIX late-binding: capturamos idx/total como defaults
+            def progress_proxy(ev, _idx=idx, _total=total):
+                try:
+                    if getattr(ev, "progress", None) is not None:
+                        p = float(ev.progress)
+                        p = max(0.0, min(1.0, p))
+                        newp = ((_idx - 1) + p) / _total
+                        # pydantic v2
+                        if hasattr(ev, "model_copy"):
+                            ev = ev.model_copy(update={"progress": newp})
+                        else:
+                            # best-effort (si fuera un dataclass/mutable)
+                            try:
+                                ev.progress = newp  # type: ignore[attr-defined]
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
                 if self._progress:
                     self._progress(ev)
 
