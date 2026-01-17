@@ -133,6 +133,11 @@ def run_ytdlp(
     - output destination paths (best effort)
     - already-downloaded signals (including archive skips)
     - real cancellation via cancel_event
+
+    NOTE:
+    We intentionally DO NOT use --restrict-filenames because it degrades readable titles
+    (e.g. "Think Love (feat. Eloise)" -> "Think_Love_feat._Eloise").
+    On Windows we use --windows-filenames + --trim-filenames for safety.
     """
     emit_progress(
         progress,
@@ -153,8 +158,15 @@ def run_ytdlp(
         audio_quality,
         "-o",
         output_template,
-        "--restrict-filenames",
     ]
+
+    # ✅ Windows-safe filenames but keep readable titles
+    if os.name == "nt":
+        cmd += [
+            "--windows-filenames",
+            "--trim-filenames",
+            "180",
+        ]
 
     # Cookies / ffmpeg / temp
     if cookies_path:
@@ -167,7 +179,7 @@ def run_ytdlp(
     # Overwrite behavior
     cmd += ["--force-overwrites"] if overwrite else ["--no-overwrites"]
 
-    # Allow caller to extend (e.g. tags, embed-thumbnail, archive, etc.)
+    # Allow caller to extend (e.g. tags, embed-thumbnail, archive, print FILE, etc.)
     if extra_args:
         cmd += list(extra_args)
 
@@ -199,7 +211,6 @@ def run_ytdlp(
                     _request_stop(proc)
                     break
             except Exception:
-                # If cancel_event isn't compatible, ignore it
                 pass
 
         # Progress percentage
