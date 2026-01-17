@@ -1,286 +1,257 @@
 from __future__ import annotations
 
-import os
-import re
-import signal
+import json
 import subprocess
-import time
-from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence
+from pathlib import Path
+from typing import List, Optional
+from urllib.parse import urlparse
 
-from audiodl.providers.base import ProgressCallback, ProviderError, emit_progress
-
-_PROGRESS_RE = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%")
-_DEST_RE = re.compile(r"Destination:\s+(.*)$")
-_ALREADY_RE = re.compile(r"\[download\].*has already been downloaded", re.IGNORECASE)
-_ARCHIVE_RE = re.compile(r"(already been recorded in the archive|already in archive)", re.IGNORECASE)
-_FILE_RE = re.compile(r"^FILE:\s*(.+)$", re.IGNORECASE)
-
-
-@dataclass(frozen=True)
-class YtDlpRunResult:
-    exit_code: int
-    output_paths: tuple[str, ...]
-    raw_lines: tuple[str, ...]
-    already_downloaded: bool = False
-    cancelled: bool = False
+from audiodl.core.models import Collection, ProviderRef, Track
+from audiodl.providers.base import (
+    DownloadOptions,
+    DownloadResult,
+    ProgressCallback,
+    ProviderError,
+    emit_progress,
+    register_provider,
+)
+from audiodl.providers.youtube.ytdlp_runner import run_ytdlp
 
 
-def _popen(cmd: Sequence[str]) -> subprocess.Popen:
-    """
-    Start yt-dlp in its own process group so we can interrupt/terminate
-    yt-dlp and its children (e.g., ffmpeg) reliably.
-    """
-    if os.name == "nt":
-        return subprocess.Popen(
-            list(cmd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+_YT_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+    "www.youtu.be",
+}
+
+
+def _is_youtube_url(s: str) -> bool:
+    try:
+        p = urlparse(s.strip())
+        if p.scheme not in ("http", "https"):
+            return False
+        host = (p.netloc or "").lower()
+        return host in _YT_HOSTS
+    except Exception:
+        return False
+
+
+def _check_output(cmd: List[str]) -> str:
+    return subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
+
+
+class YouTubeProvider:
+    @property
+    def id(self) -> str:
+        return "youtube"
+
+    @property
+    def display_name(self) -> str:
+        return "YouTube"
+
+    def can_handle(self, source: str) -> bool:
+        return _is_youtube_url(source)
+
+    def resolve(self, source: str, *, progress: Optional[ProgressCallback] = None) -> Track | Collection:
+        emit_progress(progress, provider_id=self.id, phase="resolve", message="Resolviendo URL…")
+
+        cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings", source]
+
+        try:
+            out = _check_output(cmd)
+            data = json.loads(out)
+        except subprocess.CalledProcessError as e:
+            raise ProviderError(f"yt-dlp resolve failed:\n{e.output}") from e
+        except json.JSONDecodeError as e:
+            raise ProviderError(f"Invalid yt-dlp JSON while resolving: {e}") from e
+
+        provider = ProviderRef(id=self.id, display_name=self.display_name)
+
+        # Playlist / collection
+        if isinstance(data, dict) and (data.get("_type") in ("playlist", "multi_video") or "entries" in data):
+            title = (data.get("title") or "Playlist").strip()
+            entries: List[Track] = []
+
+            for ent in data.get("entries") or []:
+                if not isinstance(ent, dict):
+                    continue
+                ent_title = (ent.get("title") or "Track").strip()
+                ent_url = ent.get("url") or ent.get("webpage_url") or ""
+                if ent_url and not ent_url.startswith("http"):
+                    ent_url = f"https://www.youtube.com/watch?v={ent_url}"
+
+                entries.append(
+                    Track(
+                        provider=provider,
+                        title=ent_title,
+                        source=ent_url or source,
+                        url=ent_url if ent_url.startswith("http") else None,
+                        duration_seconds=ent.get("duration"),
+                        thumbnail_url=ent.get("thumbnail"),
+                        meta={"id": ent.get("id")},
+                    )
+                )
+
+            emit_progress(
+                progress,
+                provider_id=self.id,
+                phase="resolve",
+                message=f"Playlist detectada: {title} ({len(entries)} items)",
+                progress_value=1.0,
+            )
+
+            return Collection(
+                provider=provider,
+                title=title,
+                source=source,
+                url=data.get("webpage_url"),
+                thumbnail_url=data.get("thumbnail"),
+                total=data.get("playlist_count") or len(entries),
+                entries=entries,
+                meta={"id": data.get("id")},
+            )
+
+        # Single video -> track
+        title = (data.get("title") or "Track").strip()
+        url = data.get("webpage_url") or source
+
+        emit_progress(progress, provider_id=self.id, phase="resolve", message=f"Track detectado: {title}", progress_value=1.0)
+
+        return Track(
+            provider=provider,
+            title=title,
+            source=source,
+            url=url,
+            duration_seconds=data.get("duration"),
+            thumbnail_url=data.get("thumbnail"),
+            artist=data.get("artist") or data.get("uploader"),
+            album=data.get("album"),
+            meta={"id": data.get("id")},
         )
 
-    return subprocess.Popen(
-        list(cmd),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-        preexec_fn=os.setsid,
-    )
+    def download(
+        self,
+        item: Track | Collection,
+        options: DownloadOptions,
+        *,
+        progress: Optional[ProgressCallback] = None,
+    ) -> DownloadResult:
+        source = str(item.url) if getattr(item, "url", None) else item.source
 
+        # ✅ Igual que tu versión buena: título legible + truncado
+        outtmpl = str(Path(options.output_dir) / "%(title).120s.%(ext)s")
 
-def _request_stop(proc: subprocess.Popen, *, gentle_timeout_s: float = 2.0) -> None:
-    """
-    Stop process (and its group) in a staged way:
-    1) Gentle interrupt (SIGINT / CTRL_BREAK_EVENT)
-    2) Terminate (SIGTERM / terminate())
-    3) Kill (SIGKILL / kill())
-    """
-    if proc.poll() is not None:
-        return
+        # Build yt-dlp extra args from advanced options
+        extra_args: List[str] = ["--no-part"]
 
-    # 1) Gentle interrupt
-    try:
-        if os.name == "nt":
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-        else:
-            os.killpg(proc.pid, signal.SIGINT)
-    except Exception:
-        try:
-            proc.send_signal(signal.SIGINT)
-        except Exception:
-            pass
-
-    t0 = time.time()
-    while time.time() - t0 < gentle_timeout_s:
-        if proc.poll() is not None:
-            return
-        time.sleep(0.05)
-
-    # 2) Terminate
-    try:
-        if os.name == "nt":
-            proc.terminate()
-        else:
-            os.killpg(proc.pid, signal.SIGTERM)
-    except Exception:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-
-    t0 = time.time()
-    while time.time() - t0 < gentle_timeout_s:
-        if proc.poll() is not None:
-            return
-        time.sleep(0.05)
-
-    # 3) Kill
-    try:
-        if os.name == "nt":
-            proc.kill()
-        else:
-            os.killpg(proc.pid, signal.SIGKILL)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-
-def run_ytdlp(
-    *,
-    source: str,
-    output_template: str,
-    audio_format: str = "mp3",
-    audio_quality: str = "0",
-    overwrite: bool = False,
-    cookies_path: Optional[str] = None,
-    ffmpeg_path: Optional[str] = None,
-    tmp_dir: Optional[str] = None,
-    progress: Optional[ProgressCallback] = None,
-    provider_id: str = "youtube",
-    extra_args: Optional[Sequence[str]] = None,
-    cancel_event: Optional[Any] = None,
-) -> YtDlpRunResult:
-    """
-    Execute yt-dlp with a consistent configuration and parse:
-    - download progress percentage
-    - output destination paths (best effort)
-    - already-downloaded signals (including archive skips)
-    - real cancellation via cancel_event
-
-    NOTE:
-    We intentionally DO NOT use --restrict-filenames because it degrades readable titles
-    (e.g. "Think Love (feat. Eloise)" -> "Think_Love_feat._Eloise").
-    On Windows we use --windows-filenames + --trim-filenames for safety.
-    """
-    emit_progress(
-        progress,
-        provider_id=provider_id,
-        phase="download",
-        message="Iniciando yt-dlp…",
-        progress_value=0.0,
-    )
-
-    cmd: List[str] = [
-        "yt-dlp",
-        "--no-warnings",
-        "--newline",
-        "-x",
-        "--audio-format",
-        audio_format,
-        "--audio-quality",
-        audio_quality,
-        "-o",
-        output_template,
-    ]
-
-    # ✅ Windows-safe filenames but keep readable titles
-    if os.name == "nt":
-        cmd += [
-            "--windows-filenames",
-            "--trim-filenames",
-            "180",
+        # Capture final file paths (runner parses FILE:)
+        extra_args += [
+            "--print",
+            "after_download:FILE:%(filepath)s",
+            "--print",
+            "after_move:FILE:%(filepath)s",
         ]
 
-    # Cookies / ffmpeg / temp
-    if cookies_path:
-        cmd += ["--cookies", cookies_path]
-    if ffmpeg_path:
-        cmd += ["--ffmpeg-location", ffmpeg_path]
-    if tmp_dir:
-        cmd += ["-P", f"temp:{tmp_dir}"]
+        # Archive / historial (best-effort, según exista en DownloadOptions)
+        if getattr(options, "use_archive", True) and getattr(options, "archive_path", None):
+            extra_args += ["--download-archive", str(options.archive_path)]
 
-    # Overwrite behavior
-    cmd += ["--force-overwrites"] if overwrite else ["--no-overwrites"]
+        # --- Format / quality behavior (matches your old "modes") ---
+        requested_fmt = (options.audio_format or "mp3").strip().lower()
+        requested_q = (options.audio_quality or "0").strip()
 
-    # Allow caller to extend (e.g. tags, embed-thumbnail, archive, print FILE, etc.)
-    if extra_args:
-        cmd += list(extra_args)
+        runner_audio_format = requested_fmt
+        runner_audio_quality = requested_q
 
-    cmd.append(str(source))
+        if requested_fmt == "best":
+            # Prefer best audio streams, don't convert
+            extra_args += ["-f", "251/140/139/bestaudio/best"]
+            runner_audio_format = "best"
+            runner_audio_quality = "0"
 
-    proc = _popen(cmd)
+        elif requested_fmt == "m4a":
+            # Prefer m4a, fallback to bestaudio; do not force conversion -> audio_format=best
+            extra_args += ["-f", "140/139/bestaudio[ext=m4a]/bestaudio/best"]
+            runner_audio_format = "best"
+            runner_audio_quality = "0"
 
-    output_paths: List[str] = []
-    raw_lines: List[str] = []
-    already_downloaded = False
-    cancelled = False
+        elif requested_fmt == "opus":
+            # Prefer opus, fallback to bestaudio; do not force conversion -> audio_format=best
+            extra_args += ["-f", "251/bestaudio[ext=opus]/bestaudio/best"]
+            runner_audio_format = "best"
+            runner_audio_quality = "0"
 
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.rstrip("\n")
-        raw_lines.append(line)
+        elif requested_fmt == "mp3":
+            # For mp3, pick good sources first; conversion happens in runner
+            extra_args += ["-f", "251/140/139/bestaudio/best"]
+            runner_audio_format = "mp3"
+            runner_audio_quality = requested_q or "0"
 
-        # ✅ Cancellation check (real stop)
-        if cancel_event is not None:
-            try:
-                if bool(getattr(cancel_event, "is_set")()):
-                    cancelled = True
-                    emit_progress(
-                        progress,
-                        provider_id=provider_id,
-                        phase="download",
-                        message="Cancelando descarga…",
-                    )
-                    _request_stop(proc)
-                    break
-            except Exception:
-                pass
+        # --- Metadata ---
+        if getattr(options, "parse_metadata_artist_title", True):
+            extra_args += [
+                "--add-metadata",
+                "--parse-metadata",
+                r"title:(?P<artist>.+?)\s*-\s*(?P<title>.+)",
+                # prevent URL from being set in comment/purl
+                "--parse-metadata",
+                r":(?P<meta_comment>)",
+                "--parse-metadata",
+                r":(?P<meta_purl>)",
+            ]
+        else:
+            extra_args += ["--add-metadata"]
 
-        # Progress percentage
-        m = _PROGRESS_RE.search(line)
-        if m:
-            try:
-                pct = float(m.group(1))
-                emit_progress(
-                    progress,
-                    provider_id=provider_id,
-                    phase="download",
-                    message=f"Descargando… {pct:.1f}%",
-                    progress_value=pct / 100.0,
-                )
-            except Exception:
-                pass
+        # Strip emojis/symbols from title (before post-processing)
+        if getattr(options, "strip_emojis", False):
+            extra_args += [
+                "--replace-in-metadata",
+                "title",
+                r"[^\x00-\x7F\u00C0-\u024F\u1E00-\u1EFF]+",
+                "",
+            ]
 
-        # Capture destination path (best effort)
-        d = _DEST_RE.search(line)
-        if d:
-            p = d.group(1).strip()
-            if p:
-                output_paths.append(p)
+        # Embed thumbnail
+        if getattr(options, "embed_thumbnail", False):
+            extra_args += ["--embed-thumbnail", "--convert-thumbnails", "jpg"]
 
-        # Capture explicit FILE: prints if provider uses --print after_move:FILE:%(filepath)s
-        f = _FILE_RE.search(line)
-        if f:
-            p = f.group(1).strip()
-            if p:
-                output_paths.append(p)
+        # Loudnorm
+        if getattr(options, "loudnorm", False):
+            extra_args += [
+                "--postprocessor-args",
+                "ExtractAudio+ffmpeg_o:-af loudnorm",
+            ]
 
-        # Already downloaded (including archive skips)
-        if _ALREADY_RE.search(line) or _ARCHIVE_RE.search(line):
-            already_downloaded = True
-
-        # Forward notable lines as postprocess messages (useful for UI logs)
-        if line.startswith("[ExtractAudio]") or line.startswith("[ffmpeg]"):
-            emit_progress(progress, provider_id=provider_id, phase="postprocess", message=line)
-
-    rc = proc.wait()
-
-    # Deduplicate while preserving order
-    deduped = list(dict.fromkeys(output_paths))
-
-    if cancelled:
-        emit_progress(progress, provider_id=provider_id, phase="download", message="Descarga cancelada")
-        return YtDlpRunResult(
-            exit_code=rc,
-            output_paths=tuple(deduped),
-            raw_lines=tuple(raw_lines),
-            already_downloaded=already_downloaded,
-            cancelled=True,
+        result = run_ytdlp(
+            source=source,
+            output_template=outtmpl,
+            audio_format=runner_audio_format,
+            audio_quality=runner_audio_quality,
+            overwrite=options.overwrite,
+            cookies_path=options.cookies_path,
+            ffmpeg_path=options.ffmpeg_path,
+            tmp_dir=options.tmp_dir,
+            progress=progress,
+            provider_id=self.id,
+            extra_args=extra_args,
+            cancel_event=options.cancel_event,
         )
 
-    if rc != 0:
-        tail = "\n".join(raw_lines[-30:])
-        raise ProviderError(f"yt-dlp failed with exit code {rc}\n\nLast output:\n{tail}")
+        warnings: List[str] = []
+        if result.cancelled:
+            warnings.append("Descarga cancelada por el usuario.")
+        elif result.already_downloaded and not options.overwrite:
+            warnings.append("El archivo ya estaba descargado (archive/no-overwrites).")
 
-    emit_progress(
-        progress,
-        provider_id=provider_id,
-        phase="download",
-        message="yt-dlp completado",
-        progress_value=1.0,
-    )
+        return DownloadResult(
+            provider_id=self.id,
+            item_title=item.title,
+            output_paths=result.output_paths,
+            warnings=tuple(warnings),
+        )
 
-    return YtDlpRunResult(
-        exit_code=rc,
-        output_paths=tuple(deduped),
-        raw_lines=tuple(raw_lines),
-        already_downloaded=already_downloaded,
-        cancelled=False,
-    )
+
+register_provider(YouTubeProvider())
