@@ -144,6 +144,48 @@ class YouTubeProvider:
         # ✅ Safer path building on Windows
         outtmpl = str(Path(options.output_dir) / "%(title)s.%(ext)s")
 
+        # Build yt-dlp extra args from advanced options
+        extra_args: List[str] = ["--no-part"]
+
+        # Archive / historial
+        if getattr(options, "use_archive", True) and getattr(options, "archive_path", None):
+            extra_args += ["--download-archive", str(options.archive_path)]
+
+        # Metadata parsing "Artista - Título"
+        if getattr(options, "parse_metadata_artist_title", True):
+            extra_args += [
+                "--add-metadata",
+                "--parse-metadata",
+                r"title:(?P<artist>.+?)\s*-\s*(?P<title>.+)",
+                # Best-effort: prevent URL from being set in comment/purl
+                "--parse-metadata",
+                r":(?P<meta_comment>)",
+                "--parse-metadata",
+                r":(?P<meta_purl>)",
+            ]
+        else:
+            extra_args += ["--add-metadata"]
+
+        # Strip emojis/symbols from title (before post-processing)
+        if getattr(options, "strip_emojis", False):
+            extra_args += [
+                "--replace-in-metadata",
+                "title",
+                r"[^\x00-\x7F\u00C0-\u024F\u1E00-\u1EFF]+",
+                "",
+            ]
+
+        # Embed thumbnail
+        if getattr(options, "embed_thumbnail", False):
+            extra_args += ["--embed-thumbnail", "--convert-thumbnails", "jpg"]
+
+        # Loudnorm
+        if getattr(options, "loudnorm", False):
+            extra_args += [
+                "--postprocessor-args",
+                "ExtractAudio+ffmpeg_o:-af loudnorm",
+            ]
+
         result = run_ytdlp(
             source=source,
             output_template=outtmpl,
@@ -155,7 +197,7 @@ class YouTubeProvider:
             tmp_dir=options.tmp_dir,
             progress=progress,
             provider_id=self.id,
-            extra_args=["--no-part"],
+            extra_args=extra_args,
             cancel_event=options.cancel_event,
         )
 
