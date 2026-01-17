@@ -61,7 +61,11 @@ class AudioDLTkApp(ttk.Frame):
         self.master.rowconfigure(0, weight=1)
         self.master.columnconfigure(0, weight=1)
 
-        self.rowconfigure(2, weight=1)
+        # NOTE: row2 is the main body. We'll place:
+        # row2 row=0: basic format/quality
+        # row2 row=1: controls
+        # row2 row=2: advanced options
+        # row2 row=3: log (expands)
         self.columnconfigure(0, weight=1)
 
         top = ttk.Frame(self)
@@ -96,12 +100,14 @@ class AudioDLTkApp(ttk.Frame):
         self.chk_overwrite = ttk.Checkbutton(mid, text="Sobrescribir", variable=self.var_overwrite)
         self.chk_overwrite.grid(row=0, column=5, sticky="e", padx=(16, 0))
 
-        # Audio options row
+        # Main body
         row2 = ttk.Frame(self)
         row2.grid(row=2, column=0, sticky="nsew", padx=12, pady=6)
+        self.rowconfigure(2, weight=1)
         row2.columnconfigure(0, weight=1)
-        row2.rowconfigure(2, weight=1)
+        row2.rowconfigure(3, weight=1)  # log expands
 
+        # Audio options row
         opts = ttk.Frame(row2)
         opts.grid(row=0, column=0, sticky="ew")
         opts.columnconfigure(1, weight=1)
@@ -132,9 +138,40 @@ class AudioDLTkApp(ttk.Frame):
         self.btn_stop = ttk.Button(controls, text="Parar", command=self._on_stop, state="disabled")
         self.btn_stop.grid(row=0, column=2, sticky="e")
 
+        # Advanced options
+        adv = ttk.LabelFrame(row2, text="Opciones avanzadas")
+        adv.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        adv.columnconfigure(0, weight=1)
+        adv.columnconfigure(1, weight=1)
+
+        self.var_use_archive = tk.BooleanVar(value=True)
+        self.var_loudnorm = tk.BooleanVar(value=False)
+        self.var_embed_thumb = tk.BooleanVar(value=False)
+        self.var_parse_meta = tk.BooleanVar(value=True)
+        self.var_strip_emojis = tk.BooleanVar(value=False)
+
+        self.chk_archive = ttk.Checkbutton(adv, text="Usar historial (archive)", variable=self.var_use_archive)
+        self.chk_archive.grid(row=0, column=0, sticky="w", padx=(8, 8), pady=(6, 0))
+
+        self.chk_loudnorm = ttk.Checkbutton(adv, text="Normalizar volumen (loudnorm)", variable=self.var_loudnorm)
+        self.chk_loudnorm.grid(row=0, column=1, sticky="w", padx=(8, 8), pady=(6, 0))
+
+        self.chk_parsemeta = ttk.Checkbutton(
+            adv,
+            text="Parsear metadatos 'Artista - Título'",
+            variable=self.var_parse_meta,
+        )
+        self.chk_parsemeta.grid(row=1, column=0, sticky="w", padx=(8, 8), pady=(4, 0))
+
+        self.chk_stripemojis = ttk.Checkbutton(adv, text="Quitar emojis del título", variable=self.var_strip_emojis)
+        self.chk_stripemojis.grid(row=1, column=1, sticky="w", padx=(8, 8), pady=(4, 0))
+
+        self.chk_thumb = ttk.Checkbutton(adv, text="Incrustar miniatura como cover", variable=self.var_embed_thumb)
+        self.chk_thumb.grid(row=2, column=0, sticky="w", padx=(8, 8), pady=(4, 6))
+
         # Log area
         log_frame = ttk.LabelFrame(row2, text="Log")
-        log_frame.grid(row=2, column=0, sticky="nsew")
+        log_frame.grid(row=3, column=0, sticky="nsew")
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
 
@@ -197,6 +234,13 @@ class AudioDLTkApp(ttk.Frame):
             audio_format=fmt,
             audio_quality=quality,
             overwrite=bool(self.var_overwrite.get()),
+            # advanced
+            use_archive=bool(self.var_use_archive.get()),
+            loudnorm=bool(self.var_loudnorm.get()),
+            embed_thumbnail=bool(self.var_embed_thumb.get()),
+            parse_metadata_artist_title=bool(self.var_parse_meta.get()),
+            strip_emojis=bool(self.var_strip_emojis.get()),
+            # env
             cookies_path=str(self.settings.cookies_path) if self.settings.cookies_path else None,
             ffmpeg_path=self.settings.ffmpeg_path,
             tmp_dir=str(self.settings.tmp_dir) if self.settings.tmp_dir else None,
@@ -211,8 +255,6 @@ class AudioDLTkApp(ttk.Frame):
         self._worker.start()
 
     def _on_stop(self) -> None:
-        # Note: yt-dlp subprocess cancellation isn't wired yet.
-        # This stops UI waiting and prevents new actions; next step is adding cancellation support.
         self._stop_flag.set()
         self._append_log("⏹ Cancelación solicitada: deteniendo yt-dlp…\n")
 
@@ -225,6 +267,13 @@ class AudioDLTkApp(ttk.Frame):
         self.entry_quality.configure(state="disabled" if running else "normal")
         self.cmb_provider.configure(state="disabled" if running else "readonly")
         self.chk_overwrite.configure(state="disabled" if running else "normal")
+
+        # advanced
+        self.chk_archive.configure(state="disabled" if running else "normal")
+        self.chk_loudnorm.configure(state="disabled" if running else "normal")
+        self.chk_parsemeta.configure(state="disabled" if running else "normal")
+        self.chk_stripemojis.configure(state="disabled" if running else "normal")
+        self.chk_thumb.configure(state="disabled" if running else "normal")
 
     def _append_log(self, text: str) -> None:
         self.txt_log.insert("end", text)
