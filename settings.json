@@ -6,5 +6,5 @@
   "parse_metadata": true,
   "quitar_emojis": false,
   "embed_thumbnail": true,
-  "geometry": "2560x1009+130+130"
+  "geometry": "2560x1009+-140+58"
 }
