@@ -41,11 +41,6 @@ class Pipeline:
         self._cancel_event = cancel_event
 
     def run(self, request: PipelineRequest) -> List[CoreDownloadResult]:
-        """
-        Execute a full pipeline request.
-
-        Returns one DownloadResult per downloaded Track.
-        """
         # Ensure output dir exists early (so providers can rely on it)
         self._ensure_output_dir(request.output_dir)
 
@@ -82,10 +77,9 @@ class Pipeline:
         if isinstance(resolved, Track):
             if self._is_cancelled():
                 return results
-            results.append(self._download_track(provider, resolved, options))
+            results.append(self._download_track(provider, resolved, options, progress=self._progress))
 
         elif isinstance(resolved, Collection):
-            # Flatten collections
             results.extend(self._download_collection(provider, resolved, options))
 
         else:
@@ -114,18 +108,9 @@ class Pipeline:
         try:
             Path(output_dir).mkdir(parents=True, exist_ok=True)
         except Exception:
-            # best-effort: providers may still fail later with a clearer error
             pass
 
     def _default_archive_path(self, request: PipelineRequest) -> Optional[str]:
-        """
-        Decide archive (download-history) path.
-
-        Rules:
-        - If use_archive=False -> None
-        - If archive_path provided -> use it as-is
-        - Else -> default to <output_dir>/_logs/descargados.txt and ensure dir exists
-        """
         if not getattr(request, "use_archive", True):
             return None
 
@@ -137,14 +122,21 @@ class Pipeline:
             logs_dir.mkdir(parents=True, exist_ok=True)
             return str(logs_dir / "descargados.txt")
         except Exception:
-            # If we cannot create dirs, fall back to None (provider will ignore)
             return None
 
-    def _download_track(self, provider, track: Track, options: DownloadOptions) -> CoreDownloadResult:
+    # ✅ CAMBIO: acepta progress (para el proxy en playlists)
+    def _download_track(
+        self,
+        provider,
+        track: Track,
+        options: DownloadOptions,
+        *,
+        progress: Optional[ProgressCallback],
+    ) -> CoreDownloadResult:
         raw_result = provider.download(
             track,
             options,
-            progress=self._progress,
+            progress=progress,
         )
 
         files = [DownloadedFile(path=p) for p in raw_result.output_paths]
@@ -157,22 +149,37 @@ class Pipeline:
         )
 
     def _download_collection(self, provider, collection: Collection, options: DownloadOptions) -> List[CoreDownloadResult]:
+        # Flatten to tracks for proper progress aggregation
+        tracks: List[Track] = []
+
+        def _collect(item):
+            if isinstance(item, Track):
+                tracks.append(item)
+            elif isinstance(item, Collection):
+                for e in item.entries:
+                    _collect(e)
+
+        _collect(collection)
+
+        total = max(1, len(tracks))
         results: List[CoreDownloadResult] = []
 
-        for item in collection.entries:
+        for idx, track in enumerate(tracks, start=1):
             if self._is_cancelled():
                 break
 
-            if isinstance(item, Track):
-                results.append(self._download_track(provider, item, options))
-                # If a provider reports cancelled, we stop the rest quickly
+            # Map per-track progress [0..1] to global [(idx-1)/total .. idx/total]
+            def progress_proxy(ev):
                 try:
-                    if results and results[-1].warnings and any("cancel" in w.lower() for w in results[-1].warnings):
-                        break
+                    if ev.progress is not None:
+                        p = float(ev.progress)
+                        p = max(0.0, min(1.0, p))
+                        ev = ev.model_copy(update={"progress": ((idx - 1) + p) / total})
                 except Exception:
                     pass
+                if self._progress:
+                    self._progress(ev)
 
-            elif isinstance(item, Collection):
-                results.extend(self._download_collection(provider, item, options))
+            results.append(self._download_track(provider, track, options, progress=progress_proxy))
 
         return results

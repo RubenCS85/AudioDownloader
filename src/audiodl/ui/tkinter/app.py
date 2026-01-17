@@ -645,7 +645,7 @@ class AudioDLTkApp(ttk.Frame):
 
         try:
             p.unlink()
-            self._append_log(f"� Historial borrado: {p}\n")
+            self._append_log(f"Historial borrado: {p}\n")
             self._beep(ok=True)
             messagebox.showinfo("AudioDL", "Historial borrado.")
         except Exception as e:
