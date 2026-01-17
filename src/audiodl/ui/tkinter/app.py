@@ -29,6 +29,33 @@ class _UiEvent:
 
 
 class AudioDLTkApp(ttk.Frame):
+    """
+    Tkinter UI for AudioDL.
+    Includes advanced options + dropdowns for format/quality presets.
+    """
+
+    # Presets for audio format dropdown
+    _FORMAT_OPTIONS = [
+        "mp3",
+        "m4a",
+        "opus",
+        "best",
+    ]
+
+    # Presets for quality dropdown (meaningful mainly for mp3)
+    # yt-dlp accepts strings like "0", "320K", "192K" for mp3 quality.
+    _MP3_QUALITY_OPTIONS = [
+        ("0", "MP3 VBR V0 (máxima calidad)"),
+        ("320K", "MP3 CBR 320 kbps"),
+        ("256K", "MP3 CBR 256 kbps"),
+        ("192K", "MP3 CBR 192 kbps"),
+        ("160K", "MP3 CBR 160 kbps"),
+        ("128K", "MP3 CBR 128 kbps"),
+    ]
+
+    # For non-mp3 formats we keep a minimal option (and disable field)
+    _OTHER_QUALITY_DEFAULT = "best"
+
     def __init__(self, master: tk.Tk) -> None:
         super().__init__(master)
         self.master = master
@@ -43,8 +70,10 @@ class AudioDLTkApp(ttk.Frame):
 
         self._build_ui()
         self._refresh_providers()
-
         self._set_defaults_from_settings()
+
+        # Apply initial enable/disable state for quality combobox
+        self._sync_quality_state()
 
         # Pump UI events periodically
         self.after(100, self._drain_ui_queue)
@@ -55,17 +84,12 @@ class AudioDLTkApp(ttk.Frame):
 
     def _build_ui(self) -> None:
         self.master.title("AudioDL")
-        self.master.minsize(720, 520)
+        self.master.minsize(760, 560)
 
         self.grid(row=0, column=0, sticky="nsew")
         self.master.rowconfigure(0, weight=1)
         self.master.columnconfigure(0, weight=1)
 
-        # NOTE: row2 is the main body. We'll place:
-        # row2 row=0: basic format/quality
-        # row2 row=1: controls
-        # row2 row=2: advanced options
-        # row2 row=3: log (expands)
         self.columnconfigure(0, weight=1)
 
         top = ttk.Frame(self)
@@ -115,13 +139,28 @@ class AudioDLTkApp(ttk.Frame):
 
         ttk.Label(opts, text="Formato").grid(row=0, column=0, sticky="w")
         self.var_format = tk.StringVar(value="mp3")
-        self.entry_format = ttk.Entry(opts, textvariable=self.var_format, width=10)
-        self.entry_format.grid(row=0, column=1, sticky="w", padx=(8, 24))
+        self.cmb_format = ttk.Combobox(
+            opts,
+            textvariable=self.var_format,
+            state="readonly",
+            width=12,
+            values=self._FORMAT_OPTIONS,
+        )
+        self.cmb_format.grid(row=0, column=1, sticky="w", padx=(8, 24))
+        self.cmb_format.bind("<<ComboboxSelected>>", lambda _e: self._sync_quality_state())
 
         ttk.Label(opts, text="Calidad").grid(row=0, column=2, sticky="w")
         self.var_quality = tk.StringVar(value="0")
-        self.entry_quality = ttk.Entry(opts, textvariable=self.var_quality, width=10)
-        self.entry_quality.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.cmb_quality = ttk.Combobox(
+            opts,
+            textvariable=self.var_quality,
+            state="readonly",
+            width=26,
+        )
+        self.cmb_quality.grid(row=0, column=3, sticky="w", padx=(8, 0))
+
+        # Initialize quality list (mp3 defaults)
+        self._set_quality_values_for_format("mp3")
 
         # Buttons + progress
         controls = ttk.Frame(row2)
@@ -183,7 +222,6 @@ class AudioDLTkApp(ttk.Frame):
         self.txt_log.configure(yscrollcommand=scroll.set)
 
     def _refresh_providers(self) -> None:
-        # Ensure list_providers() includes registered ones (YouTube imported above)
         provs = list_providers()
         options = ["auto"] + [p.id for p in provs]
         self.cmb_provider["values"] = options
@@ -192,9 +230,77 @@ class AudioDLTkApp(ttk.Frame):
 
     def _set_defaults_from_settings(self) -> None:
         self.var_output.set(str(self.settings.download_dir))
-        self.var_format.set(self.settings.audio_format)
-        self.var_quality.set(self.settings.audio_quality)
+
+        # Ensure defaults are supported
+        fmt = (self.settings.audio_format or "mp3").strip().lower()
+        if fmt not in self._FORMAT_OPTIONS:
+            fmt = "mp3"
+        self.var_format.set(fmt)
+
+        q = (self.settings.audio_quality or "0").strip()
+        self.var_quality.set(q)
+
         self.var_overwrite.set(self.settings.overwrite)
+
+        # sync dropdown values
+        self._set_quality_values_for_format(fmt)
+        self._sync_quality_state()
+
+    # -------------------------
+    # Dropdown helpers
+    # -------------------------
+
+    def _set_quality_values_for_format(self, fmt: str) -> None:
+        fmt = (fmt or "").strip().lower()
+        if fmt == "mp3":
+            # Show human labels but store actual values in var_quality
+            labels = [label for _val, label in self._MP3_QUALITY_OPTIONS]
+            self.cmb_quality["values"] = labels
+
+            # If current var_quality is a raw value, map it to label
+            raw = (self.var_quality.get() or "").strip()
+            mapped_label = None
+            for val, label in self._MP3_QUALITY_OPTIONS:
+                if raw.lower() == val.lower():
+                    mapped_label = label
+                    break
+            if mapped_label is None:
+                # Default to V0
+                mapped_label = self._MP3_QUALITY_OPTIONS[0][1]
+            self.var_quality.set(mapped_label)
+        else:
+            # For non-mp3, quality is not very meaningful in the same way; keep it "best"
+            self.cmb_quality["values"] = [self._OTHER_QUALITY_DEFAULT]
+            self.var_quality.set(self._OTHER_QUALITY_DEFAULT)
+
+    def _sync_quality_state(self) -> None:
+        fmt = (self.var_format.get() or "").strip().lower()
+        # Reset list to match format
+        self._set_quality_values_for_format(fmt)
+
+        if fmt == "mp3":
+            self.cmb_quality.configure(state="readonly")
+        else:
+            self.cmb_quality.configure(state="disabled")
+
+    def _get_effective_quality_value(self) -> str:
+        """
+        Convert UI selection into yt-dlp --audio-quality value.
+        For mp3: map label -> value (0, 320K, etc.)
+        For others: return "best" (or empty is also ok, but we keep stable)
+        """
+        fmt = (self.var_format.get() or "").strip().lower()
+        q = (self.var_quality.get() or "").strip()
+
+        if fmt == "mp3":
+            # q is a label, map back to value
+            for val, label in self._MP3_QUALITY_OPTIONS:
+                if q == label:
+                    return val
+            # fallback
+            return "0"
+
+        return self._OTHER_QUALITY_DEFAULT
 
     # -------------------------
     # Actions
@@ -221,8 +327,12 @@ class AudioDLTkApp(ttk.Frame):
             messagebox.showwarning("AudioDL", "Selecciona una carpeta de destino.")
             return
 
-        fmt = self.var_format.get().strip() or "mp3"
-        quality = self.var_quality.get().strip() or "0"
+        fmt = (self.var_format.get() or "mp3").strip().lower()
+        if fmt not in self._FORMAT_OPTIONS:
+            fmt = "mp3"
+
+        quality = self._get_effective_quality_value()
+
         provider_id = self.var_provider.get().strip()
         if provider_id == "auto":
             provider_id = None
@@ -263,8 +373,14 @@ class AudioDLTkApp(ttk.Frame):
         self.btn_stop.configure(state="normal" if running else "disabled")
         self.entry_source.configure(state="disabled" if running else "normal")
         self.entry_output.configure(state="disabled" if running else "normal")
-        self.entry_format.configure(state="disabled" if running else "normal")
-        self.entry_quality.configure(state="disabled" if running else "normal")
+
+        self.cmb_format.configure(state="disabled" if running else "readonly")
+        # quality depends on format; when stopping, re-sync state
+        if running:
+            self.cmb_quality.configure(state="disabled")
+        else:
+            self._sync_quality_state()
+
         self.cmb_provider.configure(state="disabled" if running else "readonly")
         self.chk_overwrite.configure(state="disabled" if running else "normal")
 
@@ -294,7 +410,6 @@ class AudioDLTkApp(ttk.Frame):
     # -------------------------
 
     def _progress_cb(self, event: ProgressEvent) -> None:
-        # Called from worker thread; enqueue for UI thread
         msg = f"[{event.provider_id}][{event.phase}] {event.message}"
         self._ui_queue.put(_UiEvent(kind="log", message=msg + "\n"))
         if event.progress is not None:
@@ -343,7 +458,6 @@ class AudioDLTkApp(ttk.Frame):
 
 def run() -> None:
     root = tk.Tk()
-    # Use a nicer default theme when available
     try:
         style = ttk.Style(root)
         if "clam" in style.theme_names():
