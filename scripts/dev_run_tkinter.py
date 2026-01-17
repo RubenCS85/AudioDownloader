@@ -12,14 +12,26 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
 # Ensure project root / src is on sys.path
+# ---------------------------------------------------------------------------
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from audiodl.ui.tkinter import run  # noqa: E402
+# ---------------------------------------------------------------------------
+# Launch UI
+# ---------------------------------------------------------------------------
+
+from src.audiodl.ui.tkinter import run  # noqa: E402
+
+
+def main() -> None:
+    run()
 
 
 if __name__ == "__main__":
-    run()
+    main()
