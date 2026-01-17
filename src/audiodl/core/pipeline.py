@@ -10,7 +10,8 @@ Responsibilities:
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Any
+from pathlib import Path
+from typing import Any, List, Optional
 
 from audiodl.core.models import (
     Collection,
@@ -52,6 +53,8 @@ class Pipeline:
             progress=self._progress,
         )
 
+        archive_path = self._default_archive_path(request)
+
         options = DownloadOptions(
             output_dir=request.output_dir,
             audio_format=request.audio_format,
@@ -60,6 +63,14 @@ class Pipeline:
             cookies_path=request.cookies_path,
             ffmpeg_path=request.ffmpeg_path,
             tmp_dir=request.tmp_dir,
+            # advanced
+            use_archive=bool(request.use_archive),
+            archive_path=archive_path,
+            loudnorm=bool(request.loudnorm),
+            embed_thumbnail=bool(request.embed_thumbnail),
+            parse_metadata_artist_title=bool(request.parse_metadata_artist_title),
+            strip_emojis=bool(request.strip_emojis),
+            # cancellation
             cancel_event=self._cancel_event,
         )
 
@@ -87,6 +98,29 @@ class Pipeline:
         if request.provider_id:
             return get_provider(request.provider_id)
         return find_provider_for_source(request.source)
+
+    def _default_archive_path(self, request: PipelineRequest) -> Optional[str]:
+        """
+        Decide archive (download-history) path.
+
+        Rules:
+        - If use_archive=False -> None
+        - If archive_path provided -> use it as-is
+        - Else -> default to <output_dir>/_logs/descargados.txt and ensure dir exists
+        """
+        if not getattr(request, "use_archive", True):
+            return None
+
+        if request.archive_path:
+            return request.archive_path
+
+        try:
+            logs_dir = Path(request.output_dir) / "_logs"
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            return str(logs_dir / "descargados.txt")
+        except Exception:
+            # If we cannot create dirs, fall back to None (provider will ignore)
+            return None
 
     def _download_track(
         self,
