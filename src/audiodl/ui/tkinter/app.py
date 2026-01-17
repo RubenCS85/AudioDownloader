@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, urlparse, urlencode, urlunparse
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -20,10 +23,18 @@ from audiodl.providers.base import ProgressEvent, list_providers
 # Ensure providers are registered at import time.
 from audiodl.providers.youtube import provider as _youtube_provider  # noqa: F401
 
+try:
+    import winsound  # type: ignore
+
+    _HAS_WINSOUND = True
+except Exception:
+    _HAS_WINSOUND = False
+
 
 # -------------------------
 # UI state persistence
 # -------------------------
+
 
 def _ui_state_path() -> Path:
     d = Path.home() / ".audiodl"
@@ -55,6 +66,7 @@ def _save_ui_state(data: dict) -> None:
 # -------------------------
 # Tooltip helper
 # -------------------------
+
 
 class ToolTip:
     def __init__(self, widget: tk.Widget, text: str, *, wraplength: int = 420) -> None:
@@ -111,11 +123,50 @@ class ToolTip:
 # UI event bridge
 # -------------------------
 
+
 @dataclass(frozen=True)
 class _UiEvent:
     kind: str  # "log" | "progress" | "done" | "error"
     message: str = ""
     progress: Optional[float] = None
+
+
+# -------------------------
+# URL helpers
+# -------------------------
+
+
+def _looks_like_youtube_watch_with_list(url: str) -> bool:
+    try:
+        p = urlparse(url.strip())
+        if p.scheme not in ("http", "https"):
+            return False
+        host = (p.netloc or "").lower()
+        if "youtube.com" not in host and "youtu.be" not in host:
+            return False
+        qs = parse_qs(p.query or "")
+        return ("v" in qs) and ("list" in qs)
+    except Exception:
+        return False
+
+
+def _strip_to_single_video(url: str) -> str:
+    """
+    If a URL has v=... and list=..., reduce it to watch?v=...
+    """
+    p = urlparse(url.strip())
+    qs = parse_qs(p.query or "")
+    v = (qs.get("v") or [""])[0].strip()
+    if not v:
+        return url
+    clean_q = urlencode({"v": v})
+    clean = p._replace(path="/watch", query=clean_q, fragment="")
+    return urlunparse(clean)
+
+
+# -------------------------
+# App
+# -------------------------
 
 
 class AudioDLTkApp(ttk.Frame):
@@ -152,7 +203,6 @@ class AudioDLTkApp(ttk.Frame):
         self._worker: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
 
-        # UI state persistence
         self._state = _load_ui_state()
         self._save_after_id: Optional[str] = None
 
@@ -164,13 +214,42 @@ class AudioDLTkApp(ttk.Frame):
         self._apply_ui_state_overrides()
         self._sync_quality_state()
 
+        # Center at start (only if geometry not persisted)
+        if not isinstance(self._state.get("geometry"), str) or not self._state.get("geometry"):
+            self.master.after(0, self._center_window)
+
         # Save on close
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Auto-save when vars change
         self._wire_auto_save()
 
+        # Shortcuts
+        self.master.bind("<Return>", lambda _e: self._on_start(), add=True)
+        self.master.bind("<Escape>", lambda _e: self._on_stop(), add=True)
+
         self.after(100, self._drain_ui_queue)
+
+    # -------------------------
+    # Window helpers
+    # -------------------------
+
+    def _center_window(self) -> None:
+        try:
+            self.master.update_idletasks()
+            w = self.master.winfo_width()
+            h = self.master.winfo_height()
+            if w <= 1 or h <= 1:
+                # fallback to requested size
+                w = self.master.winfo_reqwidth()
+                h = self.master.winfo_reqheight()
+            sw = self.master.winfo_screenwidth()
+            sh = self.master.winfo_screenheight()
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 2)
+            self.master.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            pass
 
     # -------------------------
     # UI state helpers
@@ -240,6 +319,8 @@ class AudioDLTkApp(ttk.Frame):
             if isinstance(v, bool):
                 var.set(v)
 
+        self._update_clear_url_button()
+
     def _wire_auto_save(self) -> None:
         vars_to_watch = [
             self.var_source,
@@ -257,6 +338,9 @@ class AudioDLTkApp(ttk.Frame):
         for v in vars_to_watch:
             v.trace_add("write", lambda *_args: self._save_ui_state_debounced())
 
+        # also refresh "X" visibility
+        self.var_source.trace_add("write", lambda *_a: self._update_clear_url_button())
+
     def _on_close(self) -> None:
         self._save_ui_state_now()
         self.master.destroy()
@@ -267,7 +351,7 @@ class AudioDLTkApp(ttk.Frame):
 
     def _build_ui(self) -> None:
         self.master.title("AudioDL")
-        self.master.minsize(780, 580)
+        self.master.minsize(820, 600)
 
         self.grid(row=0, column=0, sticky="nsew")
         self.master.rowconfigure(0, weight=1)
@@ -281,12 +365,29 @@ class AudioDLTkApp(ttk.Frame):
 
         lbl_source = ttk.Label(top, text="URL / Fuente")
         lbl_source.grid(row=0, column=0, sticky="w")
+
         self.var_source = tk.StringVar()
-        self.entry_source = ttk.Entry(top, textvariable=self.var_source)
-        self.entry_source.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        src_wrap = ttk.Frame(top)
+        src_wrap.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        src_wrap.columnconfigure(0, weight=1)
+
+        self.entry_source = ttk.Entry(src_wrap, textvariable=self.var_source)
+        self.entry_source.grid(row=0, column=0, sticky="ew")
+
+        # Clear URL button (looks "inside" the input, placed on the right)
+        self.btn_clear_url = ttk.Button(src_wrap, text="✕", width=3, command=self._clear_url)
+        self.btn_clear_url.grid(row=0, column=1, sticky="e", padx=(6, 0))
+        ToolTip(self.btn_clear_url, "Borrar la URL.")
 
         ToolTip(lbl_source, "Pega una URL (vídeo, playlist o canal).")
         ToolTip(self.entry_source, "Ejemplos:\n- https://www.youtube.com/watch?v=...\n- Una playlist o canal también vale.")
+
+        # Select-all when clicking into the entry
+        self.entry_source.bind("<FocusIn>", self._select_all_source, add=True)
+        self.entry_source.bind("<Button-1>", self._select_all_source, add=True)
+
+        # Also after paste, check list prompt
+        self.entry_source.bind("<<Paste>>", lambda _e: self.after(10, self._maybe_prompt_list_choice), add=True)
 
         # Mid: output/provider/overwrite
         mid = ttk.Frame(self)
@@ -296,6 +397,7 @@ class AudioDLTkApp(ttk.Frame):
 
         lbl_dest = ttk.Label(mid, text="Destino")
         lbl_dest.grid(row=0, column=0, sticky="w")
+
         self.var_output = tk.StringVar()
         self.entry_output = ttk.Entry(mid, textvariable=self.var_output)
         self.entry_output.grid(row=0, column=1, sticky="ew", padx=(8, 8))
@@ -324,7 +426,7 @@ class AudioDLTkApp(ttk.Frame):
         row2.grid(row=2, column=0, sticky="nsew", padx=12, pady=6)
         self.rowconfigure(2, weight=1)
         row2.columnconfigure(0, weight=1)
-        row2.rowconfigure(3, weight=1)
+        row2.rowconfigure(4, weight=1)
 
         # Format / quality row
         opts = ttk.Frame(row2)
@@ -345,10 +447,7 @@ class AudioDLTkApp(ttk.Frame):
         self.cmb_format.grid(row=0, column=1, sticky="w", padx=(8, 24))
         self.cmb_format.bind("<<ComboboxSelected>>", lambda _e: self._sync_quality_state())
 
-        ToolTip(
-            lbl_fmt,
-            "Formato de salida / estrategia de audio.",
-        )
+        ToolTip(lbl_fmt, "Formato de salida / estrategia de audio.")
         ToolTip(
             self.cmb_format,
             "Define cómo se obtiene el audio:\n"
@@ -377,7 +476,7 @@ class AudioDLTkApp(ttk.Frame):
 
         self.btn_start = ttk.Button(controls, text="Descargar", command=self._on_start)
         self.btn_start.grid(row=0, column=0, sticky="w")
-        ToolTip(self.btn_start, "Inicia la descarga con las opciones seleccionadas.")
+        ToolTip(self.btn_start, "Inicia la descarga con las opciones seleccionadas. (Enter)")
 
         self.progress = ttk.Progressbar(controls, mode="determinate")
         self.progress.grid(row=0, column=1, sticky="ew", padx=(12, 12))
@@ -386,7 +485,7 @@ class AudioDLTkApp(ttk.Frame):
 
         self.btn_stop = ttk.Button(controls, text="Parar", command=self._on_stop, state="disabled")
         self.btn_stop.grid(row=0, column=2, sticky="e")
-        ToolTip(self.btn_stop, "Solicita cancelación (detiene yt-dlp).")
+        ToolTip(self.btn_stop, "Solicita cancelación (detiene yt-dlp). (Esc)")
 
         # Advanced options
         adv = ttk.LabelFrame(row2, text="Opciones avanzadas")
@@ -402,31 +501,35 @@ class AudioDLTkApp(ttk.Frame):
 
         self.chk_archive = ttk.Checkbutton(adv, text="Usar historial (archive)", variable=self.var_use_archive)
         self.chk_archive.grid(row=0, column=0, sticky="w", padx=(8, 8), pady=(6, 0))
-        ToolTip(self.chk_archive, "Evita descargar de nuevo elementos ya descargados anteriormente (download archive).")
+        ToolTip(self.chk_archive, "Evita descargar de nuevo elementos ya descargados anteriormente.")
+
+        btn_clear_hist = ttk.Button(adv, text="Borrar historial", command=self._clear_history)
+        btn_clear_hist.grid(row=0, column=1, sticky="e", padx=(8, 8), pady=(6, 0))
+        ToolTip(btn_clear_hist, "Borra el archivo de historial (download archive) del destino actual.")
 
         self.chk_loudnorm = ttk.Checkbutton(adv, text="Normalizar volumen (loudnorm)", variable=self.var_loudnorm)
-        self.chk_loudnorm.grid(row=0, column=1, sticky="w", padx=(8, 8), pady=(6, 0))
+        self.chk_loudnorm.grid(row=1, column=0, sticky="w", padx=(8, 8), pady=(4, 0))
         ToolTip(self.chk_loudnorm, "Aplica normalización con ffmpeg (-af loudnorm). Requiere ffmpeg.")
+
+        self.chk_thumb = ttk.Checkbutton(adv, text="Incrustar miniatura como cover", variable=self.var_embed_thumb)
+        self.chk_thumb.grid(row=1, column=1, sticky="w", padx=(8, 8), pady=(4, 0))
+        ToolTip(self.chk_thumb, "Descarga e incrusta la miniatura como portada (cover).")
 
         self.chk_parsemeta = ttk.Checkbutton(
             adv,
             text="Parsear metadatos 'Artista - Título'",
             variable=self.var_parse_meta,
         )
-        self.chk_parsemeta.grid(row=1, column=0, sticky="w", padx=(8, 8), pady=(4, 0))
+        self.chk_parsemeta.grid(row=2, column=0, sticky="w", padx=(8, 8), pady=(4, 0))
         ToolTip(self.chk_parsemeta, "Intenta separar artista/título a partir del título del vídeo (regex).")
 
         self.chk_stripemojis = ttk.Checkbutton(adv, text="Quitar emojis del título", variable=self.var_strip_emojis)
-        self.chk_stripemojis.grid(row=1, column=1, sticky="w", padx=(8, 8), pady=(4, 0))
+        self.chk_stripemojis.grid(row=2, column=1, sticky="w", padx=(8, 8), pady=(4, 6))
         ToolTip(self.chk_stripemojis, "Elimina emojis/símbolos raros del título antes de crear el archivo.")
-
-        self.chk_thumb = ttk.Checkbutton(adv, text="Incrustar miniatura como cover", variable=self.var_embed_thumb)
-        self.chk_thumb.grid(row=2, column=0, sticky="w", padx=(8, 8), pady=(4, 6))
-        ToolTip(self.chk_thumb, "Descarga e incrusta la miniatura como portada (cover).")
 
         # Log
         log_frame = ttk.LabelFrame(row2, text="Log")
-        log_frame.grid(row=3, column=0, sticky="nsew")
+        log_frame.grid(row=4, column=0, sticky="nsew")
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
 
@@ -437,6 +540,13 @@ class AudioDLTkApp(ttk.Frame):
         scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.txt_log.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.txt_log.configure(yscrollcommand=scroll.set)
+
+        # initial clear button state
+        self._update_clear_url_button()
+
+    # -------------------------
+    # Providers/settings defaults
+    # -------------------------
 
     def _refresh_providers(self) -> None:
         provs = list_providers()
@@ -484,6 +594,83 @@ class AudioDLTkApp(ttk.Frame):
         return self._OTHER_QUALITY_DEFAULT
 
     # -------------------------
+    # Small UI helpers
+    # -------------------------
+
+    def _select_all_source(self, _event=None) -> None:
+        # select-all and keep cursor at end
+        try:
+            self.entry_source.after(1, lambda: self.entry_source.select_range(0, "end"))
+            self.entry_source.after(1, lambda: self.entry_source.icursor("end"))
+        except Exception:
+            pass
+
+    def _clear_url(self) -> None:
+        self.var_source.set("")
+        try:
+            self.entry_source.focus_set()
+        except Exception:
+            pass
+
+    def _update_clear_url_button(self) -> None:
+        txt = (self.var_source.get() or "").strip()
+        try:
+            if txt:
+                self.btn_clear_url.configure(state="normal")
+            else:
+                self.btn_clear_url.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _default_archive_path(self, out_dir: str) -> Path:
+        # Mimics your legacy layout: <destino>/_logs/descargados.txt
+        base = Path(out_dir)
+        logs = base / "_logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        return logs / "descargados.txt"
+
+    def _clear_history(self) -> None:
+        out_dir = (self.var_output.get() or "").strip()
+        if not out_dir:
+            messagebox.showwarning("AudioDL", "Selecciona primero una carpeta de destino.")
+            return
+
+        p = self._default_archive_path(out_dir)
+        if not p.exists():
+            messagebox.showinfo("AudioDL", "No hay historial que borrar todavía.")
+            return
+
+        if not messagebox.askyesno("AudioDL", f"¿Borrar historial?\n\n{p}"):
+            return
+
+        try:
+            p.unlink()
+            self._append_log(f"� Historial borrado: {p}\n")
+            self._beep(ok=True)
+            messagebox.showinfo("AudioDL", "Historial borrado.")
+        except Exception as e:
+            self._append_log(f"❌ No se pudo borrar historial: {e}\n")
+            self._beep(ok=False)
+            messagebox.showerror("AudioDL", f"No se pudo borrar historial:\n{e}")
+
+    def _maybe_prompt_list_choice(self) -> None:
+        url = (self.var_source.get() or "").strip()
+        if not url:
+            return
+
+        if _looks_like_youtube_watch_with_list(url):
+            # Ask once per change: if user already removed list, won't ask again.
+            yes_all = messagebox.askyesno(
+                "AudioDL",
+                "Esta URL parece incluir una lista (list=...).\n\n"
+                "¿Quieres descargar TODA la lista?\n\n"
+                "Sí = lista completa\n"
+                "No = solo la canción",
+            )
+            if not yes_all:
+                self.var_source.set(_strip_to_single_video(url))
+
+    # -------------------------
     # Actions
     # -------------------------
 
@@ -503,6 +690,12 @@ class AudioDLTkApp(ttk.Frame):
             messagebox.showwarning("AudioDL", "Introduce una URL o fuente.")
             return
 
+        # playlist/list prompt if needed
+        self._maybe_prompt_list_choice()
+        source = self.var_source.get().strip()
+        if not source:
+            return
+
         out_dir = self.var_output.get().strip()
         if not out_dir:
             messagebox.showwarning("AudioDL", "Selecciona una carpeta de destino.")
@@ -515,6 +708,11 @@ class AudioDLTkApp(ttk.Frame):
         fmt = self._get_selected_format_value()
         quality = self._get_effective_quality_value()
 
+        # archive path default
+        archive_path = None
+        if bool(self.var_use_archive.get()):
+            archive_path = str(self._default_archive_path(out_dir))
+
         req = PipelineRequest(
             source=source,
             output_dir=out_dir,
@@ -524,6 +722,7 @@ class AudioDLTkApp(ttk.Frame):
             overwrite=bool(self.var_overwrite.get()),
             # advanced
             use_archive=bool(self.var_use_archive.get()),
+            archive_path=archive_path,
             loudnorm=bool(self.var_loudnorm.get()),
             embed_thumbnail=bool(self.var_embed_thumb.get()),
             parse_metadata_artist_title=bool(self.var_parse_meta.get()),
@@ -537,19 +736,25 @@ class AudioDLTkApp(ttk.Frame):
         self._stop_flag.clear()
         self._set_running(True)
         self._append_log("▶ Iniciando…\n")
-        self._set_progress(0.0)
+
+        # Start indeterminate while resolving
+        self._set_progress(None)
 
         self._worker = threading.Thread(target=self._run_pipeline, args=(req,), daemon=True)
         self._worker.start()
 
     def _on_stop(self) -> None:
-        self._stop_flag.set()
-        self._append_log("⏹ Cancelación solicitada: deteniendo yt-dlp…\n")
+        if self._worker and self._worker.is_alive():
+            self._stop_flag.set()
+            self._append_log("⏹ Cancelación solicitada: deteniendo yt-dlp…\n")
 
     def _set_running(self, running: bool) -> None:
         self.btn_start.configure(state="disabled" if running else "normal")
         self.btn_stop.configure(state="normal" if running else "disabled")
+
         self.entry_source.configure(state="disabled" if running else "normal")
+        self.btn_clear_url.configure(state="disabled" if running else ("normal" if self.var_source.get().strip() else "disabled"))
+
         self.entry_output.configure(state="disabled" if running else "normal")
         self.cmb_format.configure(state="disabled" if running else "readonly")
 
@@ -572,14 +777,37 @@ class AudioDLTkApp(ttk.Frame):
         self.txt_log.see("end")
 
     def _set_progress(self, value: Optional[float]) -> None:
+        """
+        value:
+          - None -> indeterminate
+          - 0..1 -> determinate
+        """
         if value is None:
             self.progress.configure(mode="indeterminate")
-            self.progress.start(10)
+            self.progress.start(12)
         else:
             self.progress.stop()
             self.progress.configure(mode="determinate")
             v = max(0.0, min(1.0, float(value)))
             self.progress["value"] = v * 100.0
+
+    def _beep(self, *, ok: bool) -> None:
+        # Always try something
+        try:
+            self.master.bell()
+        except Exception:
+            pass
+
+        if os.name == "nt" and _HAS_WINSOUND:
+            try:
+                if ok:
+                    winsound.Beep(1000, 150)
+                    winsound.Beep(1300, 180)
+                else:
+                    winsound.Beep(300, 220)
+                    winsound.Beep(300, 220)
+            except Exception:
+                pass
 
     # -------------------------
     # Worker + event bridge
@@ -588,8 +816,15 @@ class AudioDLTkApp(ttk.Frame):
     def _progress_cb(self, event: ProgressEvent) -> None:
         msg = f"[{event.provider_id}][{event.phase}] {event.message}"
         self._ui_queue.put(_UiEvent(kind="log", message=msg + "\n"))
+
+        # Make progressbar feel "alive":
+        # - resolve: indeterminate unless we get a progress float
+        # - download/postprocess: determinate if progress provided
         if event.progress is not None:
             self._ui_queue.put(_UiEvent(kind="progress", progress=event.progress))
+        else:
+            if event.phase == "resolve":
+                self._ui_queue.put(_UiEvent(kind="progress", progress=None))
 
     def _run_pipeline(self, req: PipelineRequest) -> None:
         try:
@@ -616,16 +851,23 @@ class AudioDLTkApp(ttk.Frame):
                 ev = self._ui_queue.get_nowait()
                 if ev.kind == "log":
                     self._append_log(ev.message)
+
                 elif ev.kind == "progress":
                     self._set_progress(ev.progress)
+
                 elif ev.kind == "done":
                     self._set_progress(1.0)
                     self._append_log(ev.message)
                     self._set_running(False)
+                    self._beep(ok=True)
+                    messagebox.showinfo("AudioDL", "Descarga terminada.\n\nRevisa el log para ver los archivos generados.")
+
                 elif ev.kind == "error":
                     self._set_progress(0.0)
                     self._append_log(ev.message)
                     self._set_running(False)
+                    self._beep(ok=False)
+                    messagebox.showerror("AudioDL", "Ha ocurrido un error.\n\nRevisa el log para más detalles.")
         except queue.Empty:
             pass
         finally:
