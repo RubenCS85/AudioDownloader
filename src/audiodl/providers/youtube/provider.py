@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import json
 import subprocess
 from pathlib import Path
@@ -70,7 +71,7 @@ class YouTubeProvider:
 
         provider = ProviderRef(id=self.id, display_name=self.display_name)
 
-        # ✅ Fixed precedence + safety
+        # Playlist / collection
         if isinstance(data, dict) and (data.get("_type") in ("playlist", "multi_video") or "entries" in data):
             title = (data.get("title") or "Playlist").strip()
             entries: List[Track] = []
@@ -141,23 +142,69 @@ class YouTubeProvider:
     ) -> DownloadResult:
         source = str(item.url) if getattr(item, "url", None) else item.source
 
-        # ✅ Safer path building on Windows
+        # Safer path building on Windows
         outtmpl = str(Path(options.output_dir) / "%(title)s.%(ext)s")
 
         # Build yt-dlp extra args from advanced options
         extra_args: List[str] = ["--no-part"]
 
+        # Windows-safe filenames + trimming (like your legacy UI)
+        if os.name == "nt":
+            extra_args += ["--windows-filenames", "--trim-filenames", "180"]
+
+        # Capture final file paths (runner parses FILE:)
+        extra_args += [
+            "--print",
+            "after_download:FILE:%(filepath)s",
+            "--print",
+            "after_move:FILE:%(filepath)s",
+        ]
+
         # Archive / historial
         if getattr(options, "use_archive", True) and getattr(options, "archive_path", None):
             extra_args += ["--download-archive", str(options.archive_path)]
 
-        # Metadata parsing "Artista - Título"
+        # --- Format / quality behavior (matches your old "modes") ---
+        # Goal:
+        # - mp3 -> convert to mp3 and respect --audio-quality
+        # - m4a/opus/best -> prefer stream container/codec WITHOUT forcing conversion
+        requested_fmt = (options.audio_format or "mp3").strip().lower()
+        requested_q = (options.audio_quality or "0").strip()
+
+        runner_audio_format = requested_fmt
+        runner_audio_quality = requested_q
+
+        if requested_fmt == "best":
+            # Prefer best audio streams, don't convert
+            extra_args += ["-f", "251/140/139/bestaudio/best"]
+            runner_audio_format = "best"
+            runner_audio_quality = "0"  # irrelevant but harmless
+
+        elif requested_fmt == "m4a":
+            # Prefer m4a, fallback to bestaudio; do not force conversion -> audio_format=best
+            extra_args += ["-f", "140/139/bestaudio[ext=m4a]/bestaudio/best"]
+            runner_audio_format = "best"
+            runner_audio_quality = "0"
+
+        elif requested_fmt == "opus":
+            # Prefer opus, fallback to bestaudio; do not force conversion -> audio_format=best
+            extra_args += ["-f", "251/bestaudio[ext=opus]/bestaudio/best"]
+            runner_audio_format = "best"
+            runner_audio_quality = "0"
+
+        elif requested_fmt == "mp3":
+            # For mp3, pick good audio sources first; conversion happens in runner
+            extra_args += ["-f", "251/140/139/bestaudio/best"]
+            runner_audio_format = "mp3"
+            runner_audio_quality = requested_q or "0"
+
+        # --- Metadata ---
         if getattr(options, "parse_metadata_artist_title", True):
             extra_args += [
                 "--add-metadata",
                 "--parse-metadata",
                 r"title:(?P<artist>.+?)\s*-\s*(?P<title>.+)",
-                # Best-effort: prevent URL from being set in comment/purl
+                # prevent URL from being set in comment/purl
                 "--parse-metadata",
                 r":(?P<meta_comment>)",
                 "--parse-metadata",
@@ -189,8 +236,8 @@ class YouTubeProvider:
         result = run_ytdlp(
             source=source,
             output_template=outtmpl,
-            audio_format=options.audio_format,
-            audio_quality=options.audio_quality,
+            audio_format=runner_audio_format,
+            audio_quality=runner_audio_quality,
             overwrite=options.overwrite,
             cookies_path=options.cookies_path,
             ffmpeg_path=options.ffmpeg_path,
@@ -205,7 +252,7 @@ class YouTubeProvider:
         if result.cancelled:
             warnings.append("Descarga cancelada por el usuario.")
         elif result.already_downloaded and not options.overwrite:
-            warnings.append("El archivo ya estaba descargado (no-overwrites).")
+            warnings.append("El archivo ya estaba descargado (archive/no-overwrites).")
 
         return DownloadResult(
             provider_id=self.id,
