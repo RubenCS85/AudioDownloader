@@ -8,9 +8,18 @@ Goal:
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Protocol, Sequence, Tuple, Type, TypeVar, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    TypeVar,
+    runtime_checkable,
+)
 
 # ---------------------------
 # Types (kept lightweight on purpose)
@@ -29,6 +38,7 @@ class ResolvedItem:
     - kind="track" with one track-like item
     - kind="collection" for playlists/albums/sets/etc + entries inside
     """
+
     provider_id: str
     kind: str  # "track" | "collection"
     title: str
@@ -42,6 +52,7 @@ class DownloadResult:
     Minimal result object returned by providers.
     The pipeline can enrich this later (tags, archive, postprocess, etc.).
     """
+
     provider_id: str
     item_title: str
     output_paths: Tuple[str, ...]
@@ -54,13 +65,24 @@ class DownloadOptions:
     Provider-agnostic options.
     Providers may ignore unsupported fields (but should document it).
     """
+
     output_dir: str
-    audio_format: str = "mp3"          # "mp3", "m4a", "wav"...
-    audio_quality: str = "0"           # e.g. mp3 VBR 0, or provider-specific
+    audio_format: str = "mp3"  # "mp3", "m4a", "wav"...
+    audio_quality: str = "0"  # e.g. mp3 VBR 0, or provider-specific
     overwrite: bool = False
     cookies_path: Optional[str] = None
     ffmpeg_path: Optional[str] = None
     tmp_dir: Optional[str] = None
+
+    # --- Advanced options (providers may ignore if not supported) ---
+    use_archive: bool = True
+    archive_path: Optional[str] = None  # if None and use_archive=True -> pipeline may set a default
+
+    loudnorm: bool = False
+    embed_thumbnail: bool = False
+
+    parse_metadata_artist_title: bool = True  # "Artista - Título" -> artist/title mapping (best-effort)
+    strip_emojis: bool = False
 
     # NEW: cancellation support (threading.Event-like object with is_set())
     cancel_event: Optional[Any] = None
@@ -72,8 +94,9 @@ class ProgressEvent:
     Standard progress signal for UI/CLI.
     Providers should emit these through the progress callback.
     """
+
     provider_id: str
-    phase: str                 # "resolve" | "download" | "postprocess"
+    phase: str  # "resolve" | "download" | "postprocess"
     message: str
     progress: Optional[float] = None  # 0..1 if known
 
@@ -163,7 +186,9 @@ def get_provider(provider_id: str) -> Provider:
     try:
         return _PROVIDER_REGISTRY[pid]
     except KeyError as e:
-        raise KeyError(f"Unknown provider_id '{provider_id}'. Registered: {sorted(_PROVIDER_REGISTRY)}") from e
+        raise KeyError(
+            f"Unknown provider_id '{provider_id}'. Registered: {sorted(_PROVIDER_REGISTRY)}"
+        ) from e
 
 
 def find_provider_for_source(source: ProviderInput) -> Provider:
