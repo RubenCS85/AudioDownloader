@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import queue
 import threading
 from dataclasses import dataclass
@@ -17,8 +18,38 @@ from audiodl.core.settings import load_settings
 from audiodl.providers.base import ProgressEvent, list_providers
 
 # Ensure providers are registered at import time.
-# (Later we can replace this with an auto-discovery mechanism.)
 from audiodl.providers.youtube import provider as _youtube_provider  # noqa: F401
+
+
+# -------------------------
+# UI state persistence
+# -------------------------
+
+def _ui_state_path() -> Path:
+    d = Path.home() / ".audiodl"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "ui_state.json"
+
+
+def _load_ui_state() -> dict:
+    p = _ui_state_path()
+    try:
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_ui_state(data: dict) -> None:
+    p = _ui_state_path()
+    try:
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        # best-effort
+        pass
 
 
 # -------------------------
@@ -26,17 +57,10 @@ from audiodl.providers.youtube import provider as _youtube_provider  # noqa: F40
 # -------------------------
 
 class ToolTip:
-    """
-    Simple tooltip for Tkinter/ttk widgets.
-
-    Usage:
-        ToolTip(widget, "text")
-    """
     def __init__(self, widget: tk.Widget, text: str, *, wraplength: int = 420) -> None:
         self.widget = widget
         self.text = text
         self.wraplength = wraplength
-
         self._tip: Optional[tk.Toplevel] = None
         self._after_id: Optional[str] = None
 
@@ -45,7 +69,6 @@ class ToolTip:
         widget.bind("<ButtonPress>", self._on_leave, add=True)
 
     def _on_enter(self, _event=None) -> None:
-        # small delay to avoid flicker
         self._after_id = self.widget.after(350, self._show)
 
     def _on_leave(self, _event=None) -> None:
@@ -60,8 +83,6 @@ class ToolTip:
     def _show(self) -> None:
         if self._tip is not None:
             return
-
-        # Try to place tooltip near mouse pointer
         try:
             x, y = self.widget.winfo_pointerx(), self.widget.winfo_pointery()
         except Exception:
@@ -98,12 +119,7 @@ class _UiEvent:
 
 
 class AudioDLTkApp(ttk.Frame):
-    """
-    Tkinter UI for AudioDL.
-    Includes advanced options + dropdowns for format/quality presets + tooltips.
-    """
-
-    # Human labels -> internal audio_format values expected by the pipeline/provider
+    # Human labels -> internal audio_format values
     _FORMAT_LABEL_TO_VALUE = {
         "Mejor audio (sin convertir)": "best",
         "Preferir M4A (sin convertir)": "m4a",
@@ -112,7 +128,6 @@ class AudioDLTkApp(ttk.Frame):
     }
     _FORMAT_VALUE_TO_LABEL = {v: k for k, v in _FORMAT_LABEL_TO_VALUE.items()}
 
-    # Quality presets (for mp3)
     _MP3_QUALITY_OPTIONS = [
         ("0", "VBR V0 (máxima calidad)"),
         ("320K", "CBR 320 kbps"),
@@ -137,12 +152,119 @@ class AudioDLTkApp(ttk.Frame):
         self._worker: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
 
+        # UI state persistence
+        self._state = _load_ui_state()
+        self._save_after_id: Optional[str] = None
+
         self._build_ui()
         self._refresh_providers()
+
+        # Apply defaults: settings -> then ui_state overrides
         self._set_defaults_from_settings()
+        self._apply_ui_state_overrides()
+
         self._sync_quality_state()
 
+        # Save on close
+        self.master.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Auto-save when vars change
+        self._wire_auto_save()
+
         self.after(100, self._drain_ui_queue)
+
+    # -------------------------
+    # UI state helpers
+    # -------------------------
+
+    def _collect_ui_state(self) -> dict:
+        return {
+            "geometry": self.master.geometry(),
+            "source": self.var_source.get(),
+            "output_dir": self.var_output.get(),
+            "provider": self.var_provider.get(),
+            "overwrite": bool(self.var_overwrite.get()),
+            "format_label": self.var_format_label.get(),
+            "quality_label": self.var_quality_label.get(),
+            "use_archive": bool(self.var_use_archive.get()),
+            "loudnorm": bool(self.var_loudnorm.get()),
+            "embed_thumbnail": bool(self.var_embed_thumb.get()),
+            "parse_metadata": bool(self.var_parse_meta.get()),
+            "strip_emojis": bool(self.var_strip_emojis.get()),
+        }
+
+    def _save_ui_state_now(self) -> None:
+        _save_ui_state(self._collect_ui_state())
+
+    def _save_ui_state_debounced(self) -> None:
+        if self._save_after_id:
+            try:
+                self.after_cancel(self._save_after_id)
+            except Exception:
+                pass
+        self._save_after_id = self.after(250, self._save_ui_state_now)
+
+    def _apply_ui_state_overrides(self) -> None:
+        s = self._state or {}
+
+        # geometry
+        geo = s.get("geometry")
+        if isinstance(geo, str) and geo:
+            try:
+                self.master.geometry(geo)
+            except Exception:
+                pass
+
+        # fields
+        if isinstance(s.get("source"), str):
+            self.var_source.set(s["source"])
+        if isinstance(s.get("output_dir"), str) and s["output_dir"]:
+            self.var_output.set(s["output_dir"])
+        if isinstance(s.get("provider"), str) and s["provider"]:
+            self.var_provider.set(s["provider"])
+
+        if isinstance(s.get("overwrite"), bool):
+            self.var_overwrite.set(s["overwrite"])
+
+        if isinstance(s.get("format_label"), str) and s["format_label"] in self._FORMAT_LABEL_TO_VALUE:
+            self.var_format_label.set(s["format_label"])
+
+        # quality label only if mp3; else will be overridden by sync
+        if isinstance(s.get("quality_label"), str) and s["quality_label"]:
+            self.var_quality_label.set(s["quality_label"])
+
+        for key, var in [
+            ("use_archive", self.var_use_archive),
+            ("loudnorm", self.var_loudnorm),
+            ("embed_thumbnail", self.var_embed_thumb),
+            ("parse_metadata", self.var_parse_meta),
+            ("strip_emojis", self.var_strip_emojis),
+        ]:
+            v = s.get(key)
+            if isinstance(v, bool):
+                var.set(v)
+
+    def _wire_auto_save(self) -> None:
+        # Changes in these variables should persist between sessions
+        vars_to_watch = [
+            self.var_source,
+            self.var_output,
+            self.var_provider,
+            self.var_overwrite,
+            self.var_format_label,
+            self.var_quality_label,
+            self.var_use_archive,
+            self.var_loudnorm,
+            self.var_embed_thumb,
+            self.var_parse_meta,
+            self.var_strip_emojis,
+        ]
+        for v in vars_to_watch:
+            v.trace_add("write", lambda *_args: self._save_ui_state_debounced())
+
+    def _on_close(self) -> None:
+        self._save_ui_state_now()
+        self.master.destroy()
 
     # -------------------------
     # UI construction
@@ -168,17 +290,8 @@ class AudioDLTkApp(ttk.Frame):
         self.entry_source = ttk.Entry(top, textvariable=self.var_source)
         self.entry_source.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        ToolTip(
-            lbl_source,
-            "Pega una URL (vídeo, playlist o canal). El proveedor se auto-detecta si está en 'auto'.",
-        )
-        ToolTip(
-            self.entry_source,
-            "Ejemplos:\n"
-            "- https://www.youtube.com/watch?v=...\n"
-            "- https://www.youtube.com/playlist?list=...\n"
-            "- https://www.youtube.com/@canal/videos",
-        )
+        ToolTip(lbl_source, "Pega una URL (vídeo, playlist o canal).")
+        ToolTip(self.entry_source, "Ejemplos:\n- https://www.youtube.com/watch?v=...\n- Playlist/canal también vale.")
 
         # Mid: output/provider/overwrite
         mid = ttk.Frame(self)
@@ -193,30 +306,26 @@ class AudioDLTkApp(ttk.Frame):
         btn_choose = ttk.Button(mid, text="Elegir…", command=self._choose_output_dir)
         btn_choose.grid(row=0, column=2, sticky="ew")
 
-        ToolTip(self.entry_output, "Carpeta donde se guardarán los audios descargados.")
+        ToolTip(self.entry_output, "Carpeta donde se guardarán los audios.")
         ToolTip(btn_choose, "Selecciona la carpeta de destino.")
 
         ttk.Label(mid, text="Proveedor").grid(row=0, column=3, sticky="w", padx=(16, 0))
         self.var_provider = tk.StringVar(value="auto")
         self.cmb_provider = ttk.Combobox(mid, textvariable=self.var_provider, state="readonly", width=18)
         self.cmb_provider.grid(row=0, column=4, sticky="ew", padx=(8, 0))
-        ToolTip(self.cmb_provider, "Selecciona el proveedor o deja 'auto' para detección automática.")
+        ToolTip(self.cmb_provider, "Selecciona proveedor o deja 'auto'.")
 
         self.var_overwrite = tk.BooleanVar(value=False)
         self.chk_overwrite = ttk.Checkbutton(mid, text="Sobrescribir", variable=self.var_overwrite)
         self.chk_overwrite.grid(row=0, column=5, sticky="e", padx=(16, 0))
-        ToolTip(
-            self.chk_overwrite,
-            "Si está activado, reemplaza archivos existentes.\n"
-            "Si está desactivado, yt-dlp evitará descargar si ya existe.",
-        )
+        ToolTip(self.chk_overwrite, "Si está activado, reemplaza archivos existentes.")
 
         # Main body
         row2 = ttk.Frame(self)
         row2.grid(row=2, column=0, sticky="nsew", padx=12, pady=6)
         self.rowconfigure(2, weight=1)
         row2.columnconfigure(0, weight=1)
-        row2.rowconfigure(3, weight=1)  # log expands
+        row2.rowconfigure(3, weight=1)
 
         # Format / quality row
         opts = ttk.Frame(row2)
@@ -239,24 +348,20 @@ class AudioDLTkApp(ttk.Frame):
         ToolTip(
             self.cmb_format,
             "Define cómo se obtiene el audio:\n"
-            "- Mejor audio / Preferir M4A / Preferir Opus: intenta evitar convertir (más rápido y sin pérdidas)\n"
-            "- MP3: convierte con ffmpeg y aplica la calidad seleccionada.",
+            "- Mejor audio / Preferir M4A / Preferir Opus: intenta evitar convertir\n"
+            "- MP3: convierte con ffmpeg y usa la calidad seleccionada",
         )
 
         ttk.Label(opts, text="Calidad").grid(row=0, column=2, sticky="w")
         self.var_quality_label = tk.StringVar()
-        self.cmb_quality = ttk.Combobox(
-            opts,
-            textvariable=self.var_quality_label,
-            state="readonly",
-            width=22,
-        )
+        self.cmb_quality = ttk.Combobox(opts, textvariable=self.var_quality_label, state="readonly", width=22)
         self.cmb_quality.grid(row=0, column=3, sticky="w", padx=(8, 0))
 
         ToolTip(
             self.cmb_quality,
-            "Calidad de MP3 (solo aplica si eliges 'MP3').\n"
-            "V0 = VBR (muy buena), 320K = CBR (máximo bitrate constante).",
+            "Calidad para MP3:\n"
+            "- V0 (VBR): excelente\n"
+            "- 320K (CBR): máximo bitrate constante",
         )
 
         # Controls + progress
@@ -266,16 +371,13 @@ class AudioDLTkApp(ttk.Frame):
 
         self.btn_start = ttk.Button(controls, text="Descargar", command=self._on_start)
         self.btn_start.grid(row=0, column=0, sticky="w")
-        ToolTip(self.btn_start, "Inicia la descarga usando la configuración seleccionada.")
 
         self.progress = ttk.Progressbar(controls, mode="determinate")
         self.progress.grid(row=0, column=1, sticky="ew", padx=(12, 12))
         self.progress["value"] = 0
-        ToolTip(self.progress, "Progreso aproximado. En playlists, depende de yt-dlp.")
 
         self.btn_stop = ttk.Button(controls, text="Parar", command=self._on_stop, state="disabled")
         self.btn_stop.grid(row=0, column=2, sticky="e")
-        ToolTip(self.btn_stop, "Solicita cancelación. Intentará detener yt-dlp y ffmpeg.")
 
         # Advanced options
         adv = ttk.LabelFrame(row2, text="Opciones avanzadas")
@@ -291,19 +393,9 @@ class AudioDLTkApp(ttk.Frame):
 
         self.chk_archive = ttk.Checkbutton(adv, text="Usar historial (archive)", variable=self.var_use_archive)
         self.chk_archive.grid(row=0, column=0, sticky="w", padx=(8, 8), pady=(6, 0))
-        ToolTip(
-            self.chk_archive,
-            "Evita descargar de nuevo lo ya descargado.\n"
-            "Se guarda un archivo descargados.txt en <destino>/_logs/descargados.txt.",
-        )
 
         self.chk_loudnorm = ttk.Checkbutton(adv, text="Normalizar volumen (loudnorm)", variable=self.var_loudnorm)
         self.chk_loudnorm.grid(row=0, column=1, sticky="w", padx=(8, 8), pady=(6, 0))
-        ToolTip(
-            self.chk_loudnorm,
-            "Aplica normalización EBU R128 con ffmpeg (filtro loudnorm).\n"
-            "Requiere ffmpeg disponible.",
-        )
 
         self.chk_parsemeta = ttk.Checkbutton(
             adv,
@@ -311,27 +403,12 @@ class AudioDLTkApp(ttk.Frame):
             variable=self.var_parse_meta,
         )
         self.chk_parsemeta.grid(row=1, column=0, sticky="w", padx=(8, 8), pady=(4, 0))
-        ToolTip(
-            self.chk_parsemeta,
-            "Intenta dividir el título del vídeo en 'Artista' y 'Título' usando el patrón:\n"
-            "Artista - Título",
-        )
 
         self.chk_stripemojis = ttk.Checkbutton(adv, text="Quitar emojis del título", variable=self.var_strip_emojis)
         self.chk_stripemojis.grid(row=1, column=1, sticky="w", padx=(8, 8), pady=(4, 0))
-        ToolTip(
-            self.chk_stripemojis,
-            "Elimina emojis/símbolos de los metadatos (title) antes del postprocesado.\n"
-            "Útil para evitar nombres raros o incompatibles.",
-        )
 
         self.chk_thumb = ttk.Checkbutton(adv, text="Incrustar miniatura como cover", variable=self.var_embed_thumb)
         self.chk_thumb.grid(row=2, column=0, sticky="w", padx=(8, 8), pady=(4, 6))
-        ToolTip(
-            self.chk_thumb,
-            "Incrusta la miniatura como carátula (cover art) dentro del audio.\n"
-            "Puede requerir ffmpeg según el formato.",
-        )
 
         # Log
         log_frame = ttk.LabelFrame(row2, text="Log")
@@ -346,12 +423,6 @@ class AudioDLTkApp(ttk.Frame):
         scroll.grid(row=0, column=1, sticky="ns")
         self.txt_log.configure(yscrollcommand=scroll.set)
 
-        ToolTip(self.txt_log, "Salida del pipeline / yt-dlp. Útil para diagnosticar problemas.")
-
-    # -------------------------
-    # Provider list / defaults
-    # -------------------------
-
     def _refresh_providers(self) -> None:
         provs = list_providers()
         options = ["auto"] + [p.id for p in provs]
@@ -363,18 +434,11 @@ class AudioDLTkApp(ttk.Frame):
         self.var_output.set(str(self.settings.download_dir))
         self.var_overwrite.set(self.settings.overwrite)
 
-        # format defaults from settings (mp3/best/m4a/opus)
         fmt_value = (self.settings.audio_format or "mp3").strip().lower()
-        fmt_label = self._FORMAT_VALUE_TO_LABEL.get(fmt_value, self._FORMAT_VALUE_TO_LABEL["mp3"])
-        self.var_format_label.set(fmt_label)
+        self.var_format_label.set(self._FORMAT_VALUE_TO_LABEL.get(fmt_value, self._FORMAT_VALUE_TO_LABEL["mp3"]))
 
-        # quality defaults from settings (mp3 quality: 0, 320K, etc.)
         q_value = (self.settings.audio_quality or "0").strip()
-        q_label = self._MP3_QUALITY_VALUE_TO_LABEL.get(q_value, self._MP3_QUALITY_VALUE_TO_LABEL["0"])
-        self.var_quality_label.set(q_label)
-
-        # Initialize quality list properly
-        self._sync_quality_state()
+        self.var_quality_label.set(self._MP3_QUALITY_VALUE_TO_LABEL.get(q_value, self._MP3_QUALITY_VALUE_TO_LABEL["0"]))
 
     # -------------------------
     # Dropdown logic
@@ -386,16 +450,13 @@ class AudioDLTkApp(ttk.Frame):
 
     def _sync_quality_state(self) -> None:
         fmt = self._get_selected_format_value()
-
         if fmt == "mp3":
             self.cmb_quality["values"] = [label for _val, label in self._MP3_QUALITY_OPTIONS]
-            # Keep current selection valid
             cur = (self.var_quality_label.get() or "").strip()
             if cur not in self.cmb_quality["values"]:
                 self.var_quality_label.set(self._MP3_QUALITY_VALUE_TO_LABEL["0"])
             self.cmb_quality.configure(state="readonly")
         else:
-            # quality not applicable
             self.cmb_quality["values"] = [self._OTHER_QUALITY_DEFAULT]
             self.var_quality_label.set(self._OTHER_QUALITY_DEFAULT)
             self.cmb_quality.configure(state="disabled")
