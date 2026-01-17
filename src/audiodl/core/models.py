@@ -15,6 +15,7 @@ class ProviderRef(BaseModel):
     """
     Points to the provider that can resolve/download this item.
     """
+
     id: str = Field(..., min_length=1, description="Stable provider id, e.g. 'youtube'")
     display_name: Optional[str] = Field(None, description="Human readable name")
 
@@ -23,6 +24,7 @@ class MediaBase(BaseModel):
     """
     Shared fields for Track/Collection.
     """
+
     provider: ProviderRef
     kind: ItemKind
     title: str = Field(..., min_length=1)
@@ -46,6 +48,7 @@ class Track(MediaBase):
     """
     A single downloadable audio item.
     """
+
     kind: ItemKind = Field(default=ItemKind.track, frozen=True)
 
     artist: Optional[str] = None
@@ -59,6 +62,7 @@ class Collection(MediaBase):
     """
     A playlist/album/set that contains tracks (or nested collections).
     """
+
     kind: ItemKind = Field(default=ItemKind.collection, frozen=True)
 
     entries: List["MediaItem"] = Field(default_factory=list)
@@ -77,6 +81,7 @@ class DownloadedFile(BaseModel):
     """
     One concrete file created by a provider/pipeline.
     """
+
     path: str
     mime_type: Optional[str] = None
     size_bytes: Optional[int] = Field(None, ge=0)
@@ -91,6 +96,7 @@ class DownloadResult(BaseModel):
     """
     Outcome of downloading a single Track (or a single resolved element in a batch).
     """
+
     provider_id: str
     item_title: str
     files: List[DownloadedFile] = Field(default_factory=list)
@@ -106,6 +112,7 @@ class PipelineRequest(BaseModel):
     """
     High-level request to the pipeline. UI/CLI build one of these.
     """
+
     source: str  # URL/ID/query
     output_dir: str
     provider_id: Optional[str] = None  # if user explicitly selects provider
@@ -113,6 +120,16 @@ class PipelineRequest(BaseModel):
     audio_format: str = "mp3"
     audio_quality: str = "0"
     overwrite: bool = False
+
+    # --- Advanced options (providers may ignore if not supported) ---
+    use_archive: bool = True
+    archive_path: Optional[str] = None  # if None and use_archive=True -> pipeline will default it
+
+    loudnorm: bool = False
+    embed_thumbnail: bool = False
+
+    parse_metadata_artist_title: bool = True  # "Artista - Título" -> artist/title mapping (best-effort)
+    strip_emojis: bool = False
 
     cookies_path: Optional[str] = None
     ffmpeg_path: Optional[str] = None
