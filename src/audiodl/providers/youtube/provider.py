@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import json
-import re
 import subprocess
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import List, Optional
 from urllib.parse import urlparse
 
 from audiodl.core.models import Collection, ProviderRef, Track
-from audiodl.providers.youtube.ytdlp_runner import run_ytdlp
-
 from audiodl.providers.base import (
     DownloadOptions,
     DownloadResult,
@@ -18,6 +15,7 @@ from audiodl.providers.base import (
     emit_progress,
     register_provider,
 )
+from audiodl.providers.youtube.ytdlp_runner import run_ytdlp
 
 
 _YT_HOSTS = {
@@ -41,29 +39,8 @@ def _is_youtube_url(s: str) -> bool:
         return False
 
 
-def _run(cmd: List[str]) -> subprocess.Popen:
-    # text=True gives str lines; bufsize=1 enables line-buffered reads when possible
-    return subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        universal_newlines=True,
-    )
-
-
 def _check_output(cmd: List[str]) -> str:
     return subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
-
-
-_PROGRESS_RE = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%")
-_DEST_RE = re.compile(r"Destination:\s+(.*)$")
-
-
-@dataclass(frozen=True)
-class _Resolved:
-    item: Track | Collection
 
 
 class YouTubeProvider:
@@ -79,12 +56,8 @@ class YouTubeProvider:
         return _is_youtube_url(source)
 
     def resolve(self, source: str, *, progress: Optional[ProgressCallback] = None) -> Track | Collection:
-        """
-        Resolve a YouTube URL into a Track or Collection using yt-dlp JSON output.
-        """
         emit_progress(progress, provider_id=self.id, phase="resolve", message="Resolviendo URL…")
 
-        # -J returns JSON; --flat-playlist keeps playlist entries lightweight
         cmd = ["yt-dlp", "-J", "--flat-playlist", "--no-warnings", source]
 
         try:
@@ -97,16 +70,16 @@ class YouTubeProvider:
 
         provider = ProviderRef(id=self.id, display_name=self.display_name)
 
-        # Playlist / collection
-        if isinstance(data, dict) and data.get("_type") in ("playlist", "multi_video") or "entries" in data:
+        # ✅ Fixed precedence + safety
+        if isinstance(data, dict) and (data.get("_type") in ("playlist", "multi_video") or "entries" in data):
             title = (data.get("title") or "Playlist").strip()
-            entries = []
+            entries: List[Track] = []
+
             for ent in data.get("entries") or []:
                 if not isinstance(ent, dict):
                     continue
                 ent_title = (ent.get("title") or "Track").strip()
                 ent_url = ent.get("url") or ent.get("webpage_url") or ""
-                # If flat-playlist returned an id, rebuild canonical watch URL
                 if ent_url and not ent_url.startswith("http"):
                     ent_url = f"https://www.youtube.com/watch?v={ent_url}"
 
@@ -167,7 +140,9 @@ class YouTubeProvider:
         progress: Optional[ProgressCallback] = None,
     ) -> DownloadResult:
         source = str(item.url) if getattr(item, "url", None) else item.source
-        outtmpl = f"{options.output_dir}/%(title)s.%(ext)s"
+
+        # ✅ Safer path building on Windows
+        outtmpl = str(Path(options.output_dir) / "%(title)s.%(ext)s")
 
         result = run_ytdlp(
             source=source,
@@ -181,7 +156,7 @@ class YouTubeProvider:
             progress=progress,
             provider_id=self.id,
             extra_args=["--no-part"],
-            cancel_event=options.cancel_event,  # ✅ CLAVE
+            cancel_event=options.cancel_event,
         )
 
         warnings: List[str] = []
@@ -197,5 +172,5 @@ class YouTubeProvider:
             warnings=tuple(warnings),
         )
 
-# Register at import time
+
 register_provider(YouTubeProvider())
