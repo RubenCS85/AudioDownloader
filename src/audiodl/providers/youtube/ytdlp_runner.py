@@ -144,7 +144,6 @@ class YouTubeProvider:
         # ✅ Igual que tu versión buena: título legible + truncado
         outtmpl = str(Path(options.output_dir) / "%(title).120s.%(ext)s")
 
-        # Build yt-dlp extra args from advanced options
         extra_args: List[str] = ["--no-part"]
 
         # Capture final file paths (runner parses FILE:)
@@ -167,25 +166,21 @@ class YouTubeProvider:
         runner_audio_quality = requested_q
 
         if requested_fmt == "best":
-            # Prefer best audio streams, don't convert
             extra_args += ["-f", "251/140/139/bestaudio/best"]
             runner_audio_format = "best"
             runner_audio_quality = "0"
 
         elif requested_fmt == "m4a":
-            # Prefer m4a, fallback to bestaudio; do not force conversion -> audio_format=best
             extra_args += ["-f", "140/139/bestaudio[ext=m4a]/bestaudio/best"]
             runner_audio_format = "best"
             runner_audio_quality = "0"
 
         elif requested_fmt == "opus":
-            # Prefer opus, fallback to bestaudio; do not force conversion -> audio_format=best
             extra_args += ["-f", "251/bestaudio[ext=opus]/bestaudio/best"]
             runner_audio_format = "best"
             runner_audio_quality = "0"
 
         elif requested_fmt == "mp3":
-            # For mp3, pick good sources first; conversion happens in runner
             extra_args += ["-f", "251/140/139/bestaudio/best"]
             runner_audio_format = "mp3"
             runner_audio_quality = requested_q or "0"
@@ -196,7 +191,6 @@ class YouTubeProvider:
                 "--add-metadata",
                 "--parse-metadata",
                 r"title:(?P<artist>.+?)\s*-\s*(?P<title>.+)",
-                # prevent URL from being set in comment/purl
                 "--parse-metadata",
                 r":(?P<meta_comment>)",
                 "--parse-metadata",
@@ -220,10 +214,7 @@ class YouTubeProvider:
 
         # Loudnorm
         if getattr(options, "loudnorm", False):
-            extra_args += [
-                "--postprocessor-args",
-                "ExtractAudio+ffmpeg_o:-af loudnorm",
-            ]
+            extra_args += ["--postprocessor-args", "ExtractAudio+ffmpeg_o:-af loudnorm"]
 
         result = run_ytdlp(
             source=source,
