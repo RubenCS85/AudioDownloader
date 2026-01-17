@@ -182,6 +182,7 @@ def run_ytdlp(
         "--no-warnings",
         "--newline",
         "--progress-template",
+    +   "--no-mtime",
         progress_template,
         "-x",
         "--audio-format",
