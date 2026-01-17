@@ -13,6 +13,8 @@ from audiodl.providers.base import ProgressCallback, ProviderError, emit_progres
 _PROGRESS_RE = re.compile(r"\[download\]\s+(\d+(?:\.\d+)?)%")
 _DEST_RE = re.compile(r"Destination:\s+(.*)$")
 _ALREADY_RE = re.compile(r"\[download\].*has already been downloaded", re.IGNORECASE)
+_ARCHIVE_RE = re.compile(r"(already been recorded in the archive|already in archive)", re.IGNORECASE)
+_FILE_RE = re.compile(r"^FILE:\s*(.+)$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -129,7 +131,7 @@ def run_ytdlp(
     Execute yt-dlp with a consistent configuration and parse:
     - download progress percentage
     - output destination paths (best effort)
-    - already-downloaded signals
+    - already-downloaded signals (including archive skips)
     - real cancellation via cancel_event
     """
     emit_progress(
@@ -165,7 +167,7 @@ def run_ytdlp(
     # Overwrite behavior
     cmd += ["--force-overwrites"] if overwrite else ["--no-overwrites"]
 
-    # Allow caller to extend (e.g. tags, embed-thumbnail, sponsorblock, etc.)
+    # Allow caller to extend (e.g. tags, embed-thumbnail, archive, etc.)
     if extra_args:
         cmd += list(extra_args)
 
@@ -222,8 +224,15 @@ def run_ytdlp(
             if p:
                 output_paths.append(p)
 
-        # Already downloaded
-        if _ALREADY_RE.search(line):
+        # Capture explicit FILE: prints if provider uses --print after_move:FILE:%(filepath)s
+        f = _FILE_RE.search(line)
+        if f:
+            p = f.group(1).strip()
+            if p:
+                output_paths.append(p)
+
+        # Already downloaded (including archive skips)
+        if _ALREADY_RE.search(line) or _ARCHIVE_RE.search(line):
             already_downloaded = True
 
         # Forward notable lines as postprocess messages (useful for UI logs)
