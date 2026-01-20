@@ -1,4 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_submodules
+
+hiddenimports = ['pydantic', 'pydantic_core']
+hiddenimports += collect_submodules('pydantic')
+hiddenimports += collect_submodules('dotenv')
 
 
 a = Analysis(
@@ -6,7 +11,7 @@ a = Analysis(
     pathex=['src'],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
