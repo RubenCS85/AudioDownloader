@@ -54,48 +54,101 @@ class YtDlpRunResult:
 
 
 def _popen(cmd: Sequence[str]) -> subprocess.Popen:
-    if os.name == "nt":
-        flags = (
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
-        return subprocess.Popen(
-            list(cmd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True,
-            creationflags=flags,
-        )
-
-    return subprocess.Popen(
-        list(cmd),
+    kwargs = dict(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
         text=True,
         bufsize=1,
         universal_newlines=True,
-        preexec_fn=os.setsid,
     )
+
+    if os.name == "nt":
+        DETACHED_PROCESS = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+
+        # ✅ evita el parpadeo: sin consola y sin "process group"
+        kwargs["creationflags"] = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            | DETACHED_PROCESS
+        )
+
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        kwargs["startupinfo"] = si
+
+        return subprocess.Popen(list(cmd), **kwargs)
+
+    kwargs["preexec_fn"] = os.setsid
+    return subprocess.Popen(list(cmd), **kwargs)
 
 
 def _request_stop(proc: subprocess.Popen, *, gentle_timeout_s: float = 2.0) -> None:
     """
-    Stop process (and its group) in a staged way:
-    1) Gentle interrupt (SIGINT / CTRL_BREAK_EVENT)
-    2) Terminate (SIGTERM / terminate())
-    3) Kill (SIGKILL / kill())
+    Stop process in a staged way.
+
+    Windows (no-console / detached-friendly):
+      1) terminate()
+      2) taskkill /T /F (kills whole process tree: yt-dlp -> ffmpeg, etc.)
+      3) kill() fallback
+
+    POSIX:
+      1) SIGINT to process group
+      2) SIGTERM to process group
+      3) SIGKILL to process group
     """
     if proc.poll() is not None:
         return
 
+    # -------------------------
+    # Windows: avoid CTRL_BREAK (needs console), use terminate + taskkill tree
+    # -------------------------
+    if os.name == "nt":
+        # 1) Terminate
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+        t0 = time.time()
+        while time.time() - t0 < gentle_timeout_s:
+            if proc.poll() is not None:
+                return
+            time.sleep(0.05)
+
+        # 2) Kill whole tree (yt-dlp can spawn ffmpeg)
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+
+        t0 = time.time()
+        while time.time() - t0 < 1.0:
+            if proc.poll() is not None:
+                return
+            time.sleep(0.05)
+
+        # 3) Last resort
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+        return
+
+    # -------------------------
+    # POSIX: use process group
+    # -------------------------
+
     # 1) Gentle interrupt
     try:
-        if os.name == "nt":
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
-        else:
-            os.killpg(proc.pid, signal.SIGINT)
+        os.killpg(proc.pid, signal.SIGINT)
     except Exception:
         try:
             proc.send_signal(signal.SIGINT)
@@ -110,10 +163,7 @@ def _request_stop(proc: subprocess.Popen, *, gentle_timeout_s: float = 2.0) -> N
 
     # 2) Terminate
     try:
-        if os.name == "nt":
-            proc.terminate()
-        else:
-            os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(proc.pid, signal.SIGTERM)
     except Exception:
         try:
             proc.terminate()
@@ -128,10 +178,7 @@ def _request_stop(proc: subprocess.Popen, *, gentle_timeout_s: float = 2.0) -> N
 
     # 3) Kill
     try:
-        if os.name == "nt":
-            proc.kill()
-        else:
-            os.killpg(proc.pid, signal.SIGKILL)
+        os.killpg(proc.pid, signal.SIGKILL)
     except Exception:
         try:
             proc.kill()
