@@ -26,7 +26,7 @@ if str(SRC) not in sys.path:
 # Launch UI
 # ---------------------------------------------------------------------------
 
-from audiodl.ui.tkinter import run 
+from audiodl.ui.tkui import run 
 
 
 def main() -> None:

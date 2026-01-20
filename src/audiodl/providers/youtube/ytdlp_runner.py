@@ -54,11 +54,11 @@ class YtDlpRunResult:
 
 
 def _popen(cmd: Sequence[str]) -> subprocess.Popen:
-    """
-    Start yt-dlp in its own process group so we can interrupt/terminate
-    yt-dlp and its children (e.g., ffmpeg) reliably.
-    """
     if os.name == "nt":
+        flags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        )
         return subprocess.Popen(
             list(cmd),
             stdout=subprocess.PIPE,
@@ -66,7 +66,7 @@ def _popen(cmd: Sequence[str]) -> subprocess.Popen:
             text=True,
             bufsize=1,
             universal_newlines=True,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=flags,
         )
 
     return subprocess.Popen(
@@ -182,8 +182,8 @@ def run_ytdlp(
         "--no-warnings",
         "--newline",
         "--progress-template",
-    +   "--no-mtime",
         progress_template,
+        "--no-mtime",
         "-x",
         "--audio-format",
         audio_format,
@@ -191,7 +191,6 @@ def run_ytdlp(
         audio_quality,
         "-o",
         output_template,
-        # IMPORTANT: we do NOT use --restrict-filenames because it makes ugly underscores, etc.
     ]
 
     # ✅ Nombres “bonitos” y seguros en Windows (como tu main.py)

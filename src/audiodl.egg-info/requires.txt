@@ -1,0 +1,14 @@
+yt-dlp>=2024.10.0
+pydantic>=2.5
+python-dotenv>=1.0
+PyYAML>=6.0
+rich>=13.7
+
+[dev]
+pytest>=7.4
+pytest-cov>=4.1
+black>=24.1
+ruff>=0.2
+mypy>=1.8
+
+[ui]
